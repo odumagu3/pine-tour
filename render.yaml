@@ -1,0 +1,15 @@
+# Render Blueprint — one-click deploy of the full app (frontend + API + WebSocket).
+# In Render: New → Blueprint → connect this repo → it reads this file.
+services:
+  - type: web
+    name: neon-whot-bet
+    runtime: node
+    plan: free
+    # --include=dev is required because the build tools (vite, esbuild, tsx)
+    # live in devDependencies and NODE_ENV=production would otherwise skip them.
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render injects PORT automatically; server.ts reads process.env.PORT.

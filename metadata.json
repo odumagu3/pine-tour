@@ -1,0 +1,6 @@
+{
+  "name": "Neon Whot! Bet",
+  "description": "A high-stakes, real-time multiplayer neon-themed Whot! card game where players seat, bet, play cards, and the winner claims the pot, featuring a secure financial dashboard, anti-cheat verification, and withdrawal portal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
