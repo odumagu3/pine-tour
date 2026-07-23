@@ -177,7 +177,7 @@ export default function GameBoard({
     switch (suit) {
       case 'circle': return { icon: '⭕', label: 'Circle', color: 'text-rose-400 border-rose-500/20 bg-rose-950/20' };
       case 'triangle': return { icon: '🔺', label: 'Triangle', color: 'text-cyan-400 border-cyan-500/20 bg-cyan-950/20' };
-      case 'cross': return { icon: '✖️', label: 'Cross', color: 'text-amber-400 border-amber-500/20 bg-amber-950/20' };
+      case 'cross': return { icon: '➕', label: 'Cross', color: 'text-amber-400 border-amber-500/20 bg-amber-950/20' };
       case 'square': return { icon: '⏹️', label: 'Square', color: 'text-violet-400 border-violet-500/20 bg-violet-950/20' };
       case 'star': return { icon: '⭐', label: 'Star', color: 'text-emerald-400 border-emerald-500/20 bg-emerald-950/20' };
       case 'whot': return { icon: '🌟', label: 'Whot', color: 'text-pink-400 border-pink-500/30 bg-pink-950/30 font-bold animate-pulse' };
