@@ -707,6 +707,7 @@ function tournamentStatus() {
       index: r.index,
       byes: r.byes.map(nameOf),
       tables: r.tables.map(tb => ({
+        roomId: tb.roomId,
         players: tb.entrantIds.map(id => ({ name: nameOf(id), isBot: !!entrantById(id)?.isBot })),
         winner: nameOf(tb.winnerId),
         done: tb.status === 'finished',
@@ -1279,6 +1280,34 @@ app.get('/api/tournament/status', (req, res) => {
   const email = (req.query.email as string) || '';
   if (!isAdminEmail(email)) return res.status(401).json({ error: 'Admin only.' });
   res.json(tournamentStatus());
+});
+
+// Live spectator snapshot of a single tournament table (admin-only). Hands are
+// omitted — only public game state (counts, top card, turn, recent log).
+app.get('/api/tournament/table', (req, res) => {
+  const email = (req.query.email as string) || '';
+  const roomId = (req.query.roomId as string) || '';
+  if (!isAdminEmail(email)) return res.status(401).json({ error: 'Admin only.' });
+  if (!tournamentTableIds.has(roomId) || !gameRooms[roomId]) return res.json({ exists: false });
+  const room = gameRooms[roomId];
+  const top = room.discardPile[room.discardPile.length - 1] || null;
+  const winner = room.winnerPlayerId ? room.players.find(p => p.id === room.winnerPlayerId) : null;
+  res.json({
+    exists: true,
+    roomId,
+    status: room.status,
+    topCard: top ? { suit: top.suit, value: top.value } : null,
+    requestedSuit: room.requestedSuit,
+    drawPileCount: room.drawPileCount,
+    winnerName: winner ? winner.name : null,
+    players: room.players.map((p, i) => ({
+      name: p.name,
+      color: p.color,
+      cardsCount: p.cardsCount,
+      active: room.status === 'playing' && i === room.activePlayerIndex,
+    })),
+    logs: room.logs.slice(-30).map(l => ({ message: l.message, type: l.type, timestamp: l.timestamp })),
+  });
 });
 
 // 3. POST Simulated Withdrawal Portal (For verified users)
