@@ -323,26 +323,29 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config?.roomName]);
 
-  // While actually playing a game, reveal the top nav on scroll and slide it away
-  // after a short idle so it doesn't cover the board on small screens. (The nav
-  // stays put on desktop via a Tailwind md: override.)
+  // While actually playing a game, hide the top nav when scrolling DOWN and show
+  // it when scrolling UP (with a threshold so jitter doesn't make it flicker).
+  // Stays put on desktop via a Tailwind md: override.
   useEffect(() => {
     const inGame = isJoined && activeTab === 'board' && !!gameState;
     if (!inGame) { setNavHidden(false); return; }
-    let idle: number | undefined;
-    const reveal = () => {
-      setNavHidden(false);
-      if (idle) window.clearTimeout(idle);
-      idle = window.setTimeout(() => setNavHidden(true), 1500);
+    let lastY = window.scrollY;
+    let ticking = false;
+    const onScroll = () => {
+      if (ticking) return;
+      ticking = true;
+      window.requestAnimationFrame(() => {
+        const y = window.scrollY;
+        const delta = y - lastY;
+        if (Math.abs(delta) > 10) {            // ignore small jitters
+          setNavHidden(delta > 0 && y > 64);    // down past a bit → hide; up → show
+          lastY = y;
+        }
+        ticking = false;
+      });
     };
-    idle = window.setTimeout(() => setNavHidden(true), 1800);
-    window.addEventListener('scroll', reveal, { passive: true });
-    window.addEventListener('touchmove', reveal, { passive: true });
-    return () => {
-      window.removeEventListener('scroll', reveal);
-      window.removeEventListener('touchmove', reveal);
-      if (idle) window.clearTimeout(idle);
-    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
   }, [isJoined, activeTab, gameState]);
 
   const handleJoinRoom = (e: React.FormEvent) => {

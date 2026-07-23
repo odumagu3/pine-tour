@@ -470,6 +470,66 @@ function endWhotGame(roomId: string, winnerId: string) {
   if (isTourney) onTournamentTableEnd(roomId, winnerId);
 }
 
+// A star card counts DOUBLE its face value; Whot (20) counts as 20.
+function cardHandValue(card: WhotCard): number {
+  if (card.value === 20 || card.suit === 'whot') return 20;
+  return card.suit === 'star' ? card.value * 2 : card.value;
+}
+
+// Called when the market is fully exhausted with no winner: sum each hand's card
+// values, eliminate the highest total, and redeal a fresh round to the
+// survivors. Repeats through play until someone empties their hand (checks out)
+// or one player is left standing.
+function resolveMarketExhausted(roomId: string) {
+  const room = gameRooms[roomId];
+  if (!room || room.status !== 'playing') return;
+  const isTourney = tournamentTableIds.has(roomId);
+
+  // Highest total card value is eliminated (ties broken by seat order).
+  let elim = room.players[0];
+  let maxSum = -1;
+  const totals = room.players.map(p => {
+    const sum = p.hand.reduce((s, c) => s + cardHandValue(c), 0);
+    if (sum > maxSum) { maxSum = sum; elim = p; }
+    return `${p.name} ${sum}`;
+  });
+
+  room.logs.push({
+    id: 'log_market_end_' + Date.now(),
+    message: `🃏 Market emptied with no winner. Card totals — ${totals.join(', ')}.`,
+    type: 'system',
+    timestamp: new Date().toISOString(),
+  });
+  room.logs.push({
+    id: 'log_market_elim_' + Date.now(),
+    message: `❌ ${elim.name} had the highest total (${maxSum}) and is eliminated!`,
+    type: 'system',
+    timestamp: new Date().toISOString(),
+  });
+
+  // Remove the eliminated player from the table.
+  room.players = room.players.filter(p => p.id !== elim.id);
+
+  // Let an eliminated human know (tournament → elimination screen; else a notice).
+  if (!elim.isBot) {
+    if (isTourney) {
+      setConnRoomForEmail(elim.id, TOURNEY_OUT);
+      sendToEmail(elim.id, { type: 'tournament-eliminated', round: tournament?.currentRound });
+    } else {
+      sendToEmail(elim.id, { type: 'warning', message: `Market emptied — you had the highest card total (${maxSum}) and were eliminated.` });
+    }
+  }
+
+  // One player left → they win the table (last man standing).
+  if (room.players.length <= 1) {
+    if (room.players.length === 1) endWhotGame(roomId, room.players[0].id);
+    return;
+  }
+
+  // Otherwise redeal a fresh round to the survivors and continue.
+  startWhotGameSession(room);
+}
+
 // =============================================================================
 // KNOCKOUT TOURNAMENT ORCHESTRATOR
 // A single tournament runs at a time. Entrants (real players and/or simulated
@@ -498,7 +558,7 @@ const tournamentTableIds = new Set<string>();
 // When a table must be decided by (ms epoch). Guards against deadlocked games,
 // stalls, and disconnects so a single table can never freeze the whole bracket.
 const tableDeadlines = new Map<string, number>();
-const TOURNAMENT_TABLE_MAX_MS = 45000; // 45s hard cap per table game
+const TOURNAMENT_TABLE_MAX_MS = 90000; // 90s hard cap per table (allows redeals)
 
 function shuffle<T>(arr: T[]): T[] {
   for (let i = arr.length - 1; i > 0; i--) {
@@ -1132,17 +1192,21 @@ function executeWhotDrawCard(roomId: string, playerId: string) {
   if (activeP.id !== playerId) return;
 
   const drawn = drawCardsFromMarket(room, 1);
-  if (drawn.length > 0) {
-    activeP.hand.push(...drawn);
-    activeP.cardsCount = activeP.hand.length;
-
-    room.logs.push({
-      id: 'log_draw_' + Date.now(),
-      message: `📥 ${activeP.name} draws 1 card from the Market.`,
-      type: 'roll',
-      timestamp: new Date().toISOString(),
-    });
+  if (drawn.length === 0) {
+    // The market is fully exhausted (whole 54-card deck is in hands) and nobody
+    // has won. Resolve by eliminating the player with the highest card total.
+    resolveMarketExhausted(roomId);
+    return;
   }
+  activeP.hand.push(...drawn);
+  activeP.cardsCount = activeP.hand.length;
+
+  room.logs.push({
+    id: 'log_draw_' + Date.now(),
+    message: `📥 ${activeP.name} draws 1 card from the Market.`,
+    type: 'roll',
+    timestamp: new Date().toISOString(),
+  });
 
   // Pass turn
   const nextPlayerIndex = (room.activePlayerIndex + room.turnDirection + room.players.length) % room.players.length;
