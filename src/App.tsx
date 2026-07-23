@@ -213,11 +213,14 @@ export default function App() {
   const handleJoinRoom = (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !userName) return;
-    // No tournament configured → don't let players in.
-    if (!config?.tournamentActive) return;
-    const room = config.roomName || roomId;
+    // No tournament configured → players can't enter, but admins always can
+    // (so they can reach the dashboard and announce the next tournament).
+    if (!config?.tournamentActive && !config?.isAdmin) return;
+    const room = config?.roomName || roomId;
     setRoomId(room);
     savePrefs({ userName, roomId: room });
+    // Admin entering with no live tournament lands straight on the dashboard.
+    if (!config?.tournamentActive && config?.isAdmin) setActiveTab('admin');
     setIsJoined(true);
     connectWebSocket();
   };
@@ -331,7 +334,11 @@ export default function App() {
               <div className="mb-4 bg-slate-900/50 border border-dashed border-slate-700 rounded-xl px-4 py-5 text-center">
                 <AlertCircle className="w-6 h-6 text-slate-500 mx-auto mb-2" />
                 <p className="text-xs font-mono text-slate-300 font-bold">No tournaments available right now</p>
-                <p className="text-[10px] font-mono text-slate-500 mt-1">Please check back soon — a new tournament will be announced here.</p>
+                <p className="text-[10px] font-mono text-slate-500 mt-1">
+                  {config?.isAdmin
+                    ? 'Enter to open the Admin dashboard and announce the next tournament.'
+                    : 'Please check back soon — a new tournament will be announced here.'}
+                </p>
               </div>
             )}
 
@@ -363,10 +370,14 @@ export default function App() {
 
               <button
                 type="submit"
-                disabled={!config?.tournamentActive}
+                disabled={!config?.tournamentActive && !config?.isAdmin}
                 className="w-full py-2.5 rounded-lg bg-neon-purple hover:bg-neon-purple/90 text-white font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(157,78,221,0.3)] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {config?.tournamentActive ? 'Enter Arena' : 'No Tournament Available'}
+                {config?.tournamentActive
+                  ? 'Enter Arena'
+                  : config?.isAdmin
+                  ? 'Enter as Admin'
+                  : 'No Tournament Available'}
               </button>
             </form>
 

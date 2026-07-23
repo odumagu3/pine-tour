@@ -1075,8 +1075,9 @@ wss.on('connection', async (ws: WebSocket, req) => {
   // roomId is ignored so all players share one consistent table.
   const userRoomId = adminConfig.defaultRoomId;
 
-  // No tournament configured → no entry. Players see "no tournaments available".
-  if (!isTournamentActive()) {
+  // No tournament configured → no entry for players. Admins may always connect
+  // so they can reach the dashboard and announce the next tournament.
+  if (!isTournamentActive() && !isAdminEmail(userEmail)) {
     ws.send(JSON.stringify({
       type: 'error',
       message: 'No tournaments available right now. Please check back soon.',
