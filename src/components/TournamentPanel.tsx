@@ -49,20 +49,34 @@ export default function TournamentPanel({ email, passcode }: TournamentPanelProp
   const action = async (path: string, body: Record<string, unknown> = {}) => {
     setError('');
     setBusy(path);
-    try {
-      const res = await fetch(apiUrl(`/api/tournament/${path}`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, passcode, ...body }),
-      });
-      const data = await res.json();
-      if (!res.ok) setError(data.error || 'Action failed.');
-      else if (data.status) setStatus(data.status);
-    } catch {
-      setError('Could not reach the tournament service.');
-    } finally {
-      setBusy(null);
+    const url = apiUrl(`/api/tournament/${path}`);
+    const payload = JSON.stringify({ email, passcode, ...body });
+    // The backend is on a free tier that sleeps after ~15 min idle. A cold start
+    // takes ~30-50s and the first request(s) can fail outright, so retry with a
+    // clear "waking up" message before giving up.
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+        });
+        const data = await res.json();
+        if (!res.ok) setError(data.error || 'Action failed.');
+        else if (data.status) setStatus(data.status);
+        setBusy(null);
+        return;
+      } catch {
+        if (attempt < maxAttempts) {
+          setError('Waking up the server (free tier can take ~30s)… retrying');
+          await new Promise(r => setTimeout(r, 3000));
+        } else {
+          setError('Could not reach the tournament service. The server may be starting up — wait a few seconds and try again.');
+        }
+      }
     }
+    setBusy(null);
   };
 
   const st = status?.status;
