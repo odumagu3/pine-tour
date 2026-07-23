@@ -7,6 +7,7 @@ import FinancePortal from './components/FinancePortal.tsx';
 import DashboardStats from './components/DashboardStats.tsx';
 import PrivacyPortal from './components/PrivacyPortal.tsx';
 import AdminDashboard from './components/AdminDashboard.tsx';
+import TournamentScreen from './components/TournamentScreen.tsx';
 import AuthGate from './components/AuthGate.tsx';
 import InstallButton from './components/InstallButton.tsx';
 import { InAppNotifications } from './components/InAppNotifications.tsx';
@@ -79,6 +80,20 @@ export default function App() {
   const [gameplayNotice, setGameplayNotice] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
 
+  // Knockout tournament participation
+  const [tourneyPhase, setTourneyPhase] = useState<'none' | 'lobby' | 'waiting' | 'playing' | 'eliminated' | 'champion'>('none');
+  const [tourneyInfo, setTourneyInfo] = useState<{ entrantCount?: number; prize?: number; sponsorName?: string; round?: number; bye?: boolean }>({});
+  const [bracketPublic, setBracketPublic] = useState<{ exists: boolean; open: boolean; status?: string; sponsorName?: string; prize?: number; entrantCount?: number } | null>(null);
+  const wantRegisterRef = useRef(false);
+  const tourneyOverlay = tourneyPhase === 'lobby' || tourneyPhase === 'waiting' || tourneyPhase === 'eliminated' || tourneyPhase === 'champion';
+
+  const fetchBracketPublic = async () => {
+    try {
+      const res = await fetch(apiUrl('/api/tournament/public'));
+      if (res.ok) setBracketPublic(await res.json());
+    } catch { /* ignore */ }
+  };
+
   // Fetch updated user profile from backend REST API
   const fetchProfile = async () => {
     if (!email) return;
@@ -107,6 +122,11 @@ export default function App() {
     socket.onopen = () => {
       setConnected(true);
       fetchProfile();
+      // If the user chose to register for the bracket, do it once connected.
+      if (wantRegisterRef.current) {
+        socket.send(JSON.stringify({ type: 'tournament-register' }));
+        wantRegisterRef.current = false;
+      }
     };
 
     socket.onmessage = (event) => {
@@ -122,6 +142,38 @@ export default function App() {
           setGameState(data.state);
           // Sync profile ledger balance in sync
           fetchProfile();
+          break;
+
+        // --- Knockout tournament participation events ---
+        case 'tournament-lobby':
+          setBracketPublic(data);
+          setTourneyInfo((p) => ({ ...p, entrantCount: data.entrantCount, prize: data.prize, sponsorName: data.sponsorName }));
+          if (data.registered) setTourneyPhase('lobby');
+          break;
+        case 'tournament-seated':
+          setTourneyPhase('playing');
+          setTourneyInfo((p) => ({ ...p, round: data.round }));
+          break;
+        case 'tournament-advanced':
+          setGameState(null);
+          setTourneyInfo((p) => ({ ...p, round: data.round, bye: !!data.bye }));
+          setTourneyPhase('waiting');
+          break;
+        case 'tournament-eliminated':
+          setGameState(null);
+          setTourneyInfo((p) => ({ ...p, round: data.round }));
+          setTourneyPhase('eliminated');
+          break;
+        case 'tournament-champion':
+          setGameState(null);
+          setTourneyInfo((p) => ({ ...p, prize: data.prize, sponsorName: data.sponsorName }));
+          setTourneyPhase('champion');
+          fetchProfile();
+          break;
+        case 'tournament-cancelled':
+          setGameState(null);
+          setTourneyPhase('none');
+          setIsJoined(false);
           break;
         case 'chat-received':
           setChatMessages((prev) => [...prev, data.message].slice(-50)); // Keep last 50
@@ -192,8 +244,9 @@ export default function App() {
   // room name, tournament on/off) show up everywhere without a manual reload.
   useEffect(() => {
     if (!email) return;
-    const refresh = () => fetchConfig(email);
+    const refresh = () => { fetchConfig(email); fetchBracketPublic(); };
     const onFocus = () => { refresh(); fetchProfile(); };
+    refresh();
     window.addEventListener('focus', onFocus);
     const id = window.setInterval(refresh, 20000);
     return () => {
@@ -213,14 +266,28 @@ export default function App() {
   const handleJoinRoom = (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !userName) return;
-    // No tournament configured → players can't enter, but admins always can
-    // (so they can reach the dashboard and announce the next tournament).
-    if (!config?.tournamentActive && !config?.isAdmin) return;
+    const isAdmin = !!config?.isAdmin;
+    const bracketOpen = !!bracketPublic?.open;
+
+    // Non-admins register for an open bracket (buy-in charged server-side).
+    if (bracketOpen && !isAdmin) {
+      savePrefs({ userName, roomId: config?.roomName || roomId });
+      wantRegisterRef.current = true;
+      setTourneyPhase('lobby');
+      setIsJoined(true);
+      connectWebSocket();
+      return;
+    }
+
+    // Otherwise: admins (dashboard) or casual play when a prize is set but no
+    // bracket exists.
+    if (!isAdmin && bracketPublic?.exists) return; // running bracket, can't join late
+    if (!config?.tournamentActive && !isAdmin) return;
     const room = config?.roomName || roomId;
     setRoomId(room);
     savePrefs({ userName, roomId: room });
-    // Admin entering with no live tournament lands straight on the dashboard.
-    if (!config?.tournamentActive && config?.isAdmin) setActiveTab('admin');
+    // Admins land straight on the dashboard (no game to play from the lobby).
+    if (isAdmin && (bracketPublic?.exists || !config?.tournamentActive)) setActiveTab('admin');
     setIsJoined(true);
     connectWebSocket();
   };
@@ -230,6 +297,7 @@ export default function App() {
     setIsJoined(false);
     setGameState(null);
     setProfile(null);
+    setTourneyPhase('none');
     await supabase.auth.signOut();
   };
 
@@ -319,16 +387,25 @@ export default function App() {
             </div>
 
             {/* Current tournament banner (admin-controlled) */}
-            {config?.tournamentActive ? (
-              <div className="mb-4 bg-gradient-to-br from-neon-green/10 to-slate-950 border border-neon-green/30 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest block">Live Tournament</span>
-                  <span className="text-sm font-bold font-display text-white truncate block">{config.sponsorName}</span>
+            {(bracketPublic?.exists || config?.tournamentActive) ? (
+              <div className="mb-4 bg-gradient-to-br from-neon-green/10 to-slate-950 border border-neon-green/30 rounded-xl px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest block">
+                      {bracketPublic?.open ? 'Registration Open' : bracketPublic?.status === 'running' ? 'Tournament In Progress' : 'Live Tournament'}
+                    </span>
+                    <span className="text-sm font-bold font-display text-white truncate block">{bracketPublic?.sponsorName || config?.sponsorName}</span>
+                  </div>
+                  <div className="text-right flex-shrink-0">
+                    <span className="text-[9px] font-mono text-slate-500 uppercase block">Cash Prize</span>
+                    <span className="text-lg font-black font-display text-neon-green neon-glow-green">{formatNaira(bracketPublic?.prize ?? config?.sponsorPrize ?? 0)}</span>
+                  </div>
                 </div>
-                <div className="text-right flex-shrink-0">
-                  <span className="text-[9px] font-mono text-slate-500 uppercase block">Cash Prize</span>
-                  <span className="text-lg font-black font-display text-neon-green neon-glow-green">{formatNaira(config.sponsorPrize)}</span>
-                </div>
+                {bracketPublic?.exists && (
+                  <div className="mt-2 pt-2 border-t border-slate-800 flex items-center gap-1.5 text-[10px] font-mono text-slate-400">
+                    <Ticket className="w-3 h-3 text-neon-purple" /> {bracketPublic.entrantCount ?? 0} registered · buy-in: 1 ticket (or your free game)
+                  </div>
+                )}
               </div>
             ) : (
               <div className="mb-4 bg-slate-900/50 border border-dashed border-slate-700 rounded-xl px-4 py-5 text-center">
@@ -370,13 +447,17 @@ export default function App() {
 
               <button
                 type="submit"
-                disabled={!config?.tournamentActive && !config?.isAdmin}
+                disabled={!(config?.isAdmin || bracketPublic?.open || (!bracketPublic?.exists && config?.tournamentActive))}
                 className="w-full py-2.5 rounded-lg bg-neon-purple hover:bg-neon-purple/90 text-white font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(157,78,221,0.3)] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {config?.tournamentActive
-                  ? 'Enter Arena'
-                  : config?.isAdmin
+                {config?.isAdmin
                   ? 'Enter as Admin'
+                  : bracketPublic?.open
+                  ? 'Register for Tournament'
+                  : bracketPublic?.status === 'running'
+                  ? 'Tournament In Progress'
+                  : config?.tournamentActive
+                  ? 'Enter Arena'
                   : 'No Tournament Available'}
               </button>
             </form>
@@ -517,11 +598,17 @@ export default function App() {
 
           {/* MAIN BODY AREA */}
           <main className="flex-1 p-3 sm:p-6 flex flex-col items-center">
-            {gameState ? (
-              <div className="w-full space-y-6">
-                
+            <div className="w-full space-y-6">
+
                 {/* 1. COMPONENT DISPATCHER */}
                 {activeTab === 'board' && (
+                  tourneyOverlay ? (
+                    <TournamentScreen
+                      phase={tourneyPhase as 'lobby' | 'waiting' | 'eliminated' | 'champion'}
+                      info={tourneyInfo}
+                      onGoToCashier={() => setActiveTab('cashier')}
+                    />
+                  ) : gameState ? (
                   <div className="space-y-6">
                     <GameBoard
                       gameState={gameState}
@@ -631,6 +718,12 @@ export default function App() {
 
                     </div>
                   </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                      <Loader2Icon className="w-10 h-10 text-neon-purple animate-spin" />
+                      <h3 className="text-sm font-semibold font-display text-white">Connecting to the arena…</h3>
+                    </div>
+                  )
                 )}
 
                 {activeTab === 'stats' && profile && (
@@ -654,14 +747,6 @@ export default function App() {
                 )}
 
               </div>
-            ) : (
-              // SPINNING LOADER FOR MATCH CONNECTIVITY
-              <div className="flex flex-col items-center justify-center py-20 space-y-4">
-                <Loader2Icon className="w-10 h-10 text-neon-purple animate-spin" />
-                <h3 className="text-sm font-semibold font-display text-white">Syncing Authorities...</h3>
-                <p className="text-xs text-slate-500 font-mono">Securing WebSocket tunnels to the tournament room</p>
-              </div>
-            )}
           </main>
         </div>
       )}

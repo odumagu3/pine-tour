@@ -570,6 +570,14 @@ function seatTournamentTable(roomId: string, entrants: TournamentEntrant[]) {
   };
   tournamentTableIds.add(roomId);
   tableDeadlines.set(roomId, Date.now() + TOURNAMENT_TABLE_MAX_MS);
+  // Move each human entrant's connection to this table so they receive the game
+  // and can play; then start (which broadcasts the opening state to them).
+  entrants.forEach(e => {
+    if (!e.isBot) {
+      setConnRoomForEmail(e.id, roomId);
+      sendToEmail(e.id, { type: 'tournament-seated', round: tournament?.currentRound ?? 1 });
+    }
+  });
   startWhotGameSession(gameRooms[roomId]);
 }
 
@@ -580,7 +588,15 @@ function buildRound(entrantIds: string[], roundIndex: number): TournamentRound {
   const tables: TournamentTable[] = [];
   const byes: string[] = [];
   chunk(shuffled, 4).forEach((group, i) => {
-    if (group.length === 1) { byes.push(group[0]); return; }
+    if (group.length === 1) {
+      byes.push(group[0]);
+      const e = entrantById(group[0]);
+      if (e && !e.isBot) {
+        setConnRoomForEmail(e.id, TOURNEY_WAIT);
+        sendToEmail(e.id, { type: 'tournament-advanced', bye: true, round: roundIndex });
+      }
+      return;
+    }
     const roomId = `__t_r${roundIndex}_${i}`;
     tables.push({ roomId, entrantIds: group, winnerId: null, status: 'playing' });
     seatTournamentTable(roomId, group.map(id => entrantById(id)!).filter(Boolean) as TournamentEntrant[]);
@@ -611,6 +627,11 @@ function finishTournament(championId: string | null) {
     });
     saveProfile(champ.id);
   }
+  // Crown the champion on their screen (if human).
+  if (champ && !champ.isBot) {
+    setConnRoomForEmail(champ.id, TOURNEY_OUT);
+    sendToEmail(champ.id, { type: 'tournament-champion', prize: tournament.prize, sponsorName: tournament.sponsorName });
+  }
   console.log(`🏆 Tournament ${tournament.id} finished. Champion: ${champ?.name ?? 'none'} (${champ?.isBot ? 'AI' : 'human'}).`);
 }
 
@@ -638,8 +659,24 @@ function onTournamentTableEnd(roomId: string, winnerId: string) {
   tableDeadlines.delete(roomId);
   table.status = 'finished';
   table.winnerId = winnerId;
+
+  // Tell the humans at this table whether they advanced or were knocked out.
+  table.entrantIds.forEach(id => {
+    const e = entrantById(id);
+    if (!e || e.isBot) return;
+    if (id === winnerId) {
+      setConnRoomForEmail(id, TOURNEY_WAIT);
+      sendToEmail(id, { type: 'tournament-advanced', round: tournament!.currentRound });
+    } else {
+      setConnRoomForEmail(id, TOURNEY_OUT);
+      sendToEmail(id, { type: 'tournament-eliminated', round: tournament!.currentRound });
+    }
+  });
+
   if (round.tables.every(t => t.status === 'finished')) {
-    advanceTournament([...round.tables.map(t => t.winnerId!), ...round.byes]);
+    // Brief pause so winners see they advanced before the next round is seeded.
+    const winners = [...round.tables.map(t => t.winnerId!), ...round.byes];
+    setTimeout(() => advanceTournament(winners), ROUND_GAP_MS);
   }
 }
 
@@ -686,6 +723,13 @@ function startTournamentRun(): { ok?: true; error?: string } {
 }
 
 function resetTournament() {
+  // Let any connected humans know the tournament was cleared.
+  tournament?.entrants.forEach(e => {
+    if (!e.isBot) {
+      setConnRoomForEmail(e.id, TOURNEY_LOBBY);
+      sendToEmail(e.id, { type: 'tournament-cancelled' });
+    }
+  });
   clearTournamentTables();
   tournament = null;
 }
@@ -717,6 +761,74 @@ function tournamentStatus() {
       })),
     })),
   };
+}
+
+// =============================================================================
+// PHASE 2 — human participation in the bracket
+// Pseudo-rooms for participants who aren't currently seated at a game table.
+// =============================================================================
+const TOURNEY_LOBBY = '__t_lobby'; // registered, waiting for the tournament to start
+const TOURNEY_WAIT = '__t_wait';   // won their table, waiting for the next round
+const TOURNEY_OUT = '__t_out';     // eliminated
+const ROUND_GAP_MS = 5000;         // pause between rounds so winners see they advanced
+
+// Send a JSON message to every open connection for an email.
+function sendToEmail(email: string, obj: any) {
+  const payload = JSON.stringify(obj);
+  Object.keys(activeConnections).forEach(cid => {
+    const c = activeConnections[cid];
+    if (c.email === email && c.ws.readyState === WebSocket.OPEN) c.ws.send(payload);
+  });
+}
+// Re-point a player's connection(s) to a room (a real table or a pseudo-room).
+function setConnRoomForEmail(email: string, roomId: string) {
+  Object.keys(activeConnections).forEach(cid => {
+    if (activeConnections[cid].email === email) activeConnections[cid].roomId = roomId;
+  });
+}
+function isEntrant(email: string): boolean {
+  return !!tournament?.entrants.find(e => e.id === email);
+}
+// Public (non-admin) view for the lobby.
+function tournamentPublicState() {
+  if (!tournament) return { exists: false, open: false };
+  return {
+    exists: true,
+    open: tournament.status === 'registering',
+    status: tournament.status,
+    sponsorName: tournament.sponsorName,
+    prize: tournament.prize,
+    entrantCount: tournament.entrants.length,
+  };
+}
+function sendLobbyTo(email: string) {
+  sendToEmail(email, { type: 'tournament-lobby', ...tournamentPublicState(), registered: isEntrant(email) });
+}
+function broadcastLobby() {
+  tournament?.entrants.forEach(e => { if (!e.isBot) sendLobbyTo(e.id); });
+}
+// Register a human, charging the buy-in (lifetime free game first, else a ticket).
+function registerHumanEntrant(email: string, name: string): { ok?: true; error?: string } {
+  if (!tournament || tournament.status !== 'registering') return { error: 'Registration is closed.' };
+  if (isEntrant(email)) return { ok: true };
+  const profile = getProfile(email);
+  if (adminConfig.freeGameEnabled && !profile.freeGameUsed) {
+    profile.freeGameUsed = true;
+  } else if (profile.tickets > 0) {
+    profile.tickets -= 1;
+  } else {
+    return { error: 'You have no tickets left. Buy tickets in the Cashier to register.' };
+  }
+  saveProfile(email);
+  tournament.entrants.push({ id: email, name, isBot: false });
+  return { ok: true };
+}
+// The live table a still-playing entrant belongs to this round (for reconnects).
+function entrantCurrentTable(email: string): string | null {
+  if (!tournament || tournament.status !== 'running') return null;
+  const round = tournament.rounds[tournament.currentRound - 1];
+  const t = round?.tables.find(tb => tb.status === 'playing' && tb.entrantIds.includes(email));
+  return t ? t.roomId : null;
 }
 
 // Bot automated Whot action
@@ -1262,7 +1374,13 @@ app.post('/api/tournament/simulate', (req, res) => {
   if (!requireAdmin(req, res)) return;
   const r = simulateEntrants(Number(req.body.count) || 0);
   if (r.error) return res.status(400).json({ error: r.error });
+  broadcastLobby(); // keep registered humans' player counts fresh
   res.json({ success: true, status: tournamentStatus() });
+});
+
+// Public (no-auth) bracket summary for the lobby's "Register" state.
+app.get('/api/tournament/public', (_req, res) => {
+  res.json(tournamentPublicState());
 });
 
 app.post('/api/tournament/start', (req, res) => {
@@ -1410,77 +1528,89 @@ wss.on('connection', async (ws: WebSocket, req) => {
   const urlParams = new URLSearchParams(req.url?.split('?')[1] || '');
   const userEmail = (urlParams.get('email') || 'hudozit@gmail.com').toLowerCase().trim();
   const userName = urlParams.get('name') || 'VoltGamer';
-  // Everyone plays in the single admin-controlled arena room; the client's
-  // roomId is ignored so all players share one consistent table.
-  const userRoomId = adminConfig.defaultRoomId;
-
-  // No tournament configured → no entry for players. Admins may always connect
-  // so they can reach the dashboard and announce the next tournament.
-  if (!isTournamentActive() && !isAdminEmail(userEmail)) {
-    ws.send(JSON.stringify({
-      type: 'error',
-      message: 'No tournaments available right now. Please check back soon.',
-    }));
-    ws.close();
-    return;
-  }
-
   const connId = `${userEmail}_${Date.now()}`;
-  activeConnections[connId] = { ws, email: userEmail, roomId: userRoomId };
-
   const profile = await ensureProfile(userEmail);
-  const state = getOrCreateRoom(userRoomId);
+  const bracketLive = !!tournament && (tournament.status === 'registering' || tournament.status === 'running');
 
-  let playerObj = state.players.find(p => p.id === userEmail);
-  if (!playerObj) {
-    if (state.players.length >= Math.min(Math.max(adminConfig.maxPlayers, 2), 4)) {
+  if (bracketLive) {
+    // --- Bracket participation path -------------------------------------------
+    // Reconnect to a live table if this player is mid-round; otherwise sit in the
+    // tournament lobby. Registration/seating is driven by messages + the engine.
+    const liveTable = entrantCurrentTable(userEmail);
+    activeConnections[connId] = { ws, email: userEmail, roomId: liveTable || TOURNEY_LOBBY };
+    if (liveTable && gameRooms[liveTable]) {
+      const p = gameRooms[liveTable].players.find(x => x.id === userEmail);
+      if (p) { p.isConnected = true; p.name = userName; }
+      broadcastRoomState(liveTable);
+    } else {
+      sendLobbyTo(userEmail);
+    }
+  } else {
+    // --- Casual arena path (no bracket running) -------------------------------
+    if (!isTournamentActive() && !isAdminEmail(userEmail)) {
       ws.send(JSON.stringify({
         type: 'error',
-        message: 'This tournament table is full. Please try again shortly.'
+        message: 'No tournaments available right now. Please check back soon.',
       }));
-      delete activeConnections[connId];
       ws.close();
       return;
     }
 
-    const assignedColors: PlayerColor[] = state.players.map(p => p.color).filter(Boolean) as PlayerColor[];
-    const allColors: PlayerColor[] = ['red', 'green', 'yellow', 'blue'];
-    const availableColor = allColors.find(c => !assignedColors.includes(c)) || null;
+    const userRoomId = adminConfig.defaultRoomId;
+    activeConnections[connId] = { ws, email: userEmail, roomId: userRoomId };
+    const state = getOrCreateRoom(userRoomId);
 
-    playerObj = {
-      id: userEmail,
-      name: userName,
-      color: availableColor,
-      isBot: false,
-      balance: profile.balance,
-      currentBet: 0,
-      ready: false,
-      cardsCount: 0,
-      hand: [],
-      isConnected: true,
-      highestRollInRound: 0,
-      totalRollsCount: 0,
-    };
-    state.players.push(playerObj);
+    let playerObj = state.players.find(p => p.id === userEmail);
+    if (!playerObj) {
+      if (state.players.length >= Math.min(Math.max(adminConfig.maxPlayers, 2), 4)) {
+        ws.send(JSON.stringify({
+          type: 'error',
+          message: 'This tournament table is full. Please try again shortly.'
+        }));
+        delete activeConnections[connId];
+        ws.close();
+        return;
+      }
 
-    state.logs.push({
-      id: 'log_join_' + Date.now(),
-      message: `👤 ${userName} seated on the ${availableColor?.toUpperCase()} seat!`,
-      type: 'info',
-      timestamp: new Date().toISOString(),
-    });
-  } else {
-    playerObj.isConnected = true;
-    playerObj.name = userName;
-    state.logs.push({
-      id: 'log_reconnect_' + Date.now(),
-      message: `⚡ ${userName} reconnected.`,
-      type: 'info',
-      timestamp: new Date().toISOString(),
-    });
+      const assignedColors: PlayerColor[] = state.players.map(p => p.color).filter(Boolean) as PlayerColor[];
+      const allColors: PlayerColor[] = ['red', 'green', 'yellow', 'blue'];
+      const availableColor = allColors.find(c => !assignedColors.includes(c)) || null;
+
+      playerObj = {
+        id: userEmail,
+        name: userName,
+        color: availableColor,
+        isBot: false,
+        balance: profile.balance,
+        currentBet: 0,
+        ready: false,
+        cardsCount: 0,
+        hand: [],
+        isConnected: true,
+        highestRollInRound: 0,
+        totalRollsCount: 0,
+      };
+      state.players.push(playerObj);
+
+      state.logs.push({
+        id: 'log_join_' + Date.now(),
+        message: `👤 ${userName} seated on the ${availableColor?.toUpperCase()} seat!`,
+        type: 'info',
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      playerObj.isConnected = true;
+      playerObj.name = userName;
+      state.logs.push({
+        id: 'log_reconnect_' + Date.now(),
+        message: `⚡ ${userName} reconnected.`,
+        type: 'info',
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    broadcastRoomState(userRoomId);
   }
-
-  broadcastRoomState(userRoomId);
 
   ws.on('message', (messageStr: string) => {
     let msg: any;
@@ -1490,6 +1620,21 @@ wss.on('connection', async (ws: WebSocket, req) => {
       return;
     }
 
+    // Register for the bracket (needs no room yet).
+    if (msg.type === 'tournament-register') {
+      const r = registerHumanEntrant(userEmail, userName);
+      if (r.error) {
+        ws.send(JSON.stringify({ type: 'error', message: r.error }));
+      } else {
+        setConnRoomForEmail(userEmail, TOURNEY_LOBBY);
+        broadcastLobby();
+      }
+      return;
+    }
+
+    // The player's current room (a game table) — dynamic so it follows them
+    // across bracket rounds. Pseudo-rooms (lobby/wait/out) have no gameRoom.
+    const userRoomId = activeConnections[connId]?.roomId || '';
     const currentRoom = gameRooms[userRoomId];
     if (!currentRoom) return;
 
@@ -1692,32 +1837,33 @@ wss.on('connection', async (ws: WebSocket, req) => {
   });
 
   ws.on('close', () => {
+    const roomId = activeConnections[connId]?.roomId;
     delete activeConnections[connId];
-    
-    const currentRoom = gameRooms[userRoomId];
+
+    const currentRoom = roomId ? gameRooms[roomId] : undefined;
     if (currentRoom) {
       const p = currentRoom.players.find(p => p.id === userEmail);
       if (p) {
         p.isConnected = false;
-        
+
         currentRoom.logs.push({
           id: 'log_leave_' + Date.now(),
-          message: `⚠️ ${p.name} left the seat. They can re-seat by entering the same table ID.`,
+          message: `⚠️ ${p.name} left the seat.`,
           type: 'info',
           timestamp: new Date().toISOString(),
         });
 
-        const anyHumans = currentRoom.players.some(p => !p.isBot && p.isConnected);
-        if (!anyHumans) {
-          currentRoom.logs.push({
-            id: 'log_empty_' + Date.now(),
-            message: `Table "${userRoomId}" is now empty. Room state resetting.`,
-            type: 'system',
-            timestamp: new Date().toISOString(),
-          });
-          delete gameRooms[userRoomId];
+        // Tournament tables keep running (bots + watchdog decide it); never
+        // delete them on a human disconnect. Only casual rooms auto-clean.
+        if (tournamentTableIds.has(roomId!)) {
+          broadcastRoomState(roomId!);
         } else {
-          broadcastRoomState(userRoomId);
+          const anyHumans = currentRoom.players.some(p => !p.isBot && p.isConnected);
+          if (!anyHumans) {
+            delete gameRooms[roomId!];
+          } else {
+            broadcastRoomState(roomId!);
+          }
         }
       }
     }
