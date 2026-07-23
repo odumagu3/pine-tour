@@ -1,8 +1,10 @@
 // Naira (₦) formatting + shared tournament economy constants.
 // Kept in one place so the client and any future integration stay consistent.
 
-export const TICKET_PACK_SIZE = 8;
-export const TICKET_PACK_PRICE = 3800; // ₦ for a pack of 8 tournament tickets
+// Ticket economy fallbacks (the live values come from the admin config).
+export const TICKET_PRICE = 300;  // ₦ per tournament ticket
+export const MIN_TICKETS = 4;     // fewest tickets buyable at once
+export const MAX_TICKETS = 64;    // most tickets buyable at once
 
 // Format an amount as Naira, e.g. 75000 -> "₦75,000".
 export function formatNaira(amount: number): string {

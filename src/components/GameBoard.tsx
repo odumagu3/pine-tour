@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Player, PlayerColor, WhotCard, CardSuit, GameState, AntiCheatAlert, UserProfile, PublicConfig } from '../types.js';
 import { HelpCircle, AlertTriangle, Play, RefreshCw, Zap, Award, Layers, Sparkles, CheckCircle2, Volume2, VolumeX, Ticket, Gift, Trophy } from 'lucide-react';
 import { playCardSound, playDrawSound, playSpecialSound, playWinSound, isSoundEnabled, setSoundEnabled, unlockAudio } from '../sound.js';
-import { formatNaira, TICKET_PACK_PRICE, TICKET_PACK_SIZE } from '../currency.js';
+import { formatNaira, TICKET_PRICE } from '../currency.js';
 
 interface GameBoardProps {
   gameState: GameState;
@@ -26,11 +26,10 @@ export default function GameBoard({
   onAddBots,
   onGoToCashier,
 }: GameBoardProps) {
-  // Ticket-pack terms + arena name from admin config (fall back to defaults).
-  const packPrice = config?.ticketPackPrice ?? TICKET_PACK_PRICE;
-  const packSize = config?.ticketPackSize ?? TICKET_PACK_SIZE;
+  // Ticket price + arena name from admin config (fall back to defaults).
+  const unitPrice = config?.ticketPrice ?? TICKET_PRICE;
   const arenaName = config?.arenaName ?? 'Neon Whot!';
-  const buyPackLabel = `🎟️ Buy Ticket Pack (${packSize} for ${formatNaira(packPrice)})`;
+  const buyPackLabel = `🎟️ Buy Tickets (from ${formatNaira(unitPrice)} each)`;
   const wsConn = (window as any).ludoSocket;
 
   // Active seat (human player)
@@ -396,7 +395,7 @@ export default function GameBoard({
               {gameState.sponsorName || 'Sponsored'} Whot! Tournament
             </h3>
             <p className="text-xs text-slate-400 mt-2 font-mono leading-relaxed">
-              Enter the tournament to compete for a cash prize put up by the sponsor. Empty seats fill with AI bot dealers — clear your hand first to win it all.
+              Enter the tournament to compete for the sponsor's cash prize. Be the first to clear your hand to win it all.
             </p>
 
             {/* SPONSOR PRIZE HERO */}
@@ -498,7 +497,7 @@ export default function GameBoard({
                     )}
                     <div className="relative">
                       <div className={`w-8 h-8 rounded-xl flex items-center justify-center text-sm border bg-slate-900/60 ${colorTheme}`}>
-                        {seat.player.isBot ? "🤖" : "👤"}
+                        {"👤"}
                       </div>
                       <span className={`absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-slate-950 ${seat.player.isConnected ? 'bg-emerald-500' : 'bg-red-500'}`} />
                     </div>
@@ -552,7 +551,7 @@ export default function GameBoard({
 
                     <div className="relative">
                       <div className={`w-6 h-6 sm:w-8 sm:h-8 rounded-lg sm:rounded-xl flex items-center justify-center font-bold text-[10px] sm:text-xs border ${playerColorTheme}`}>
-                        {seat.player.isBot ? "🤖" : "👤"}
+                        {"👤"}
                       </div>
                       <span className={`absolute -bottom-1 -right-1 w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full border border-slate-950 ${seat.player.isConnected ? 'bg-emerald-500' : 'bg-red-500'}`} />
                     </div>

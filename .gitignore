@@ -9,3 +9,6 @@ coverage/
 
 # Supabase CLI local temp/link state
 supabase/.temp/
+
+.vercel
+.env*

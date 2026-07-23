@@ -8,6 +8,7 @@ import DashboardStats from './components/DashboardStats.tsx';
 import PrivacyPortal from './components/PrivacyPortal.tsx';
 import AdminDashboard from './components/AdminDashboard.tsx';
 import AuthGate from './components/AuthGate.tsx';
+import InstallButton from './components/InstallButton.tsx';
 import { InAppNotifications } from './components/InAppNotifications.tsx';
 import { ShieldCheck, MessageSquare, Send, Bell, User, LayoutDashboard, Wallet, Database, Lock, AlertCircle, HelpCircle, Ticket, LogOut, Settings } from 'lucide-react';
 import { formatNaira } from './currency.js';
@@ -186,18 +187,37 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [email]);
 
-  // Prefill the lobby room field with the admin's default room (fresh visitors only).
+  // Keep the admin config fresh on EVERY device: re-fetch on window focus and on
+  // a short interval. This is what makes admin changes (ticket price, sponsor,
+  // room name, tournament on/off) show up everywhere without a manual reload.
   useEffect(() => {
-    if (config?.defaultRoomId && !isJoined) {
-      setRoomId(config.defaultRoomId);
-    }
+    if (!email) return;
+    const refresh = () => fetchConfig(email);
+    const onFocus = () => { refresh(); fetchProfile(); };
+    window.addEventListener('focus', onFocus);
+    const id = window.setInterval(refresh, 20000);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(id);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config]);
+  }, [email]);
+
+  // The room name is fully admin-controlled — mirror it into local state so the
+  // WebSocket connects to the single arena the admin configured.
+  useEffect(() => {
+    if (config?.roomName) setRoomId(config.roomName);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config?.roomName]);
 
   const handleJoinRoom = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !userName || !roomId) return;
-    savePrefs({ userName, roomId });
+    if (!email || !userName) return;
+    // No tournament configured → don't let players in.
+    if (!config?.tournamentActive) return;
+    const room = config.roomName || roomId;
+    setRoomId(room);
+    savePrefs({ userName, roomId: room });
     setIsJoined(true);
     connectWebSocket();
   };
@@ -295,30 +315,44 @@ export default function App() {
               </button>
             </div>
 
-            <form onSubmit={handleJoinRoom} className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-mono text-slate-400 mb-1.5">Lobby Nickname</label>
-                  <input
-                    type="text"
-                    value={userName}
-                    onChange={(e) => setUserName(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-800 rounded-lg py-2 px-3 font-mono text-xs text-white focus:outline-none focus:border-neon-purple/60"
-                    required
-                  />
+            {/* Current tournament banner (admin-controlled) */}
+            {config?.tournamentActive ? (
+              <div className="mb-4 bg-gradient-to-br from-neon-green/10 to-slate-950 border border-neon-green/30 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest block">Live Tournament</span>
+                  <span className="text-sm font-bold font-display text-white truncate block">{config.sponsorName}</span>
                 </div>
-
-                <div>
-                  <label className="block text-xs font-mono text-slate-400 mb-1.5">Arena Room ID</label>
-                  <input
-                    type="text"
-                    value={roomId}
-                    onChange={(e) => setRoomId(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-800 rounded-lg py-2 px-3 font-mono text-xs text-white focus:outline-none focus:border-neon-purple/60"
-                    required
-                  />
+                <div className="text-right flex-shrink-0">
+                  <span className="text-[9px] font-mono text-slate-500 uppercase block">Cash Prize</span>
+                  <span className="text-lg font-black font-display text-neon-green neon-glow-green">{formatNaira(config.sponsorPrize)}</span>
                 </div>
               </div>
+            ) : (
+              <div className="mb-4 bg-slate-900/50 border border-dashed border-slate-700 rounded-xl px-4 py-5 text-center">
+                <AlertCircle className="w-6 h-6 text-slate-500 mx-auto mb-2" />
+                <p className="text-xs font-mono text-slate-300 font-bold">No tournaments available right now</p>
+                <p className="text-[10px] font-mono text-slate-500 mt-1">Please check back soon — a new tournament will be announced here.</p>
+              </div>
+            )}
+
+            <form onSubmit={handleJoinRoom} className="space-y-4">
+              <div>
+                <label className="block text-xs font-mono text-slate-400 mb-1.5">Lobby Nickname</label>
+                <input
+                  type="text"
+                  value={userName}
+                  onChange={(e) => setUserName(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg py-2 px-3 font-mono text-xs text-white focus:outline-none focus:border-neon-purple/60"
+                  required
+                />
+              </div>
+
+              {config?.roomName && (
+                <div className="flex items-center justify-between bg-slate-900/40 border border-slate-800 rounded-lg px-3 py-2">
+                  <span className="text-[11px] font-mono text-slate-500">Arena</span>
+                  <span className="text-[11px] font-mono text-neon-cyan font-bold">{config.roomName}</span>
+                </div>
+              )}
 
               {connectionError && (
                 <div className="p-3 bg-red-950/40 border border-red-500/30 rounded-lg text-xs text-red-400 font-mono flex items-center gap-2">
@@ -329,11 +363,17 @@ export default function App() {
 
               <button
                 type="submit"
-                className="w-full py-2.5 rounded-lg bg-neon-purple hover:bg-neon-purple/90 text-white font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(157,78,221,0.3)] cursor-pointer"
+                disabled={!config?.tournamentActive}
+                className="w-full py-2.5 rounded-lg bg-neon-purple hover:bg-neon-purple/90 text-white font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(157,78,221,0.3)] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                Enter Arena
+                {config?.tournamentActive ? 'Enter Arena' : 'No Tournament Available'}
               </button>
             </form>
+
+            {/* Install as a mobile app (hidden once installed / standalone) */}
+            <div className="mt-4">
+              <InstallButton variant="full" />
+            </div>
 
             <div className="mt-6 pt-4 border-t border-slate-900 text-center text-[10px] text-slate-500 font-mono">
               🛡️ Adheres to GDPR Data Portability & Deletion Rights
@@ -375,6 +415,7 @@ export default function App() {
                   Connected as: <strong className="text-slate-300">{userName}</strong> ({email})
                 </span>
               </div>
+              <InstallButton variant="compact" className="ml-1" />
             </div>
 
             {/* TAB SELECTOR */}

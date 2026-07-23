@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { UserProfile, Transaction, PublicConfig } from '../types.js';
 import { CreditCard, Wallet, ArrowDownLeft, ArrowUpRight, ShieldCheck, HelpCircle, Lock, Loader2, CheckCircle2, AlertCircle, Copy, Check, Ticket, Gift } from 'lucide-react';
-import { formatNaira, TICKET_PACK_PRICE, TICKET_PACK_SIZE } from '../currency.js';
+import { formatNaira, TICKET_PRICE, MIN_TICKETS, MAX_TICKETS } from '../currency.js';
 import { apiUrl } from '../config.js';
 
 interface FinancePortalProps {
@@ -12,15 +12,18 @@ interface FinancePortalProps {
 }
 
 export default function FinancePortal({ profile, config, onRefreshProfile }: FinancePortalProps) {
-  // Ticket pack terms come from the admin config (fall back to defaults).
-  const packPrice = config?.ticketPackPrice ?? TICKET_PACK_PRICE;
-  const packSize = config?.ticketPackSize ?? TICKET_PACK_SIZE;
+  // Ticket terms come from the admin config (fall back to defaults).
+  const unitPrice = config?.ticketPrice ?? TICKET_PRICE;
+  const minQty = config?.minTickets ?? MIN_TICKETS;
+  const maxQty = config?.maxTickets ?? MAX_TICKETS;
   // Tabs: 'tickets' | 'deposit' | 'withdraw' | 'verification'
   const [activeTab, setActiveTab] = useState<'tickets' | 'deposit' | 'withdraw' | 'verification'>('tickets');
 
   // Ticket purchase states
+  const [ticketQty, setTicketQty] = useState(minQty);
   const [ticketStatus, setTicketStatus] = useState<'idle' | 'processing' | 'completed' | 'failed'>('idle');
   const [ticketError, setTicketError] = useState('');
+  const totalCost = unitPrice * ticketQty;
 
   // Deposit States
   const [depositAmount, setDepositAmount] = useState('5000');
@@ -55,11 +58,15 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
     setTimeout(() => setCopiedTxId(null), 1500);
   };
 
-  // Buy a tournament ticket pack (debited from wallet balance)
+  // Clamp a quantity into the allowed [min, max] range.
+  const clampQty = (n: number) => Math.max(minQty, Math.min(maxQty, Math.floor(n) || minQty));
+
+  // Buy the chosen quantity of tickets (debited from wallet balance)
   const handleBuyTickets = async () => {
     setTicketError('');
-    if (profile.balance < packPrice) {
-      setTicketError(`Insufficient balance. You need ${formatNaira(packPrice)}. Add funds first.`);
+    const qty = clampQty(ticketQty);
+    if (profile.balance < unitPrice * qty) {
+      setTicketError(`Insufficient balance. ${qty} tickets cost ${formatNaira(unitPrice * qty)}. Add funds first.`);
       return;
     }
 
@@ -70,7 +77,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
       const response = await fetch(apiUrl(`/api/profile/buy-tickets`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: profile.email }),
+        body: JSON.stringify({ email: profile.email, quantity: qty }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -286,7 +293,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
 
         {/* TAB CONTENTS */}
         <div className="flex-1">
-          {/* 0. TICKET PACK PORTAL */}
+          {/* 0. TICKET PORTAL — buy any quantity between min and max */}
           {activeTab === 'tickets' && (
             <AnimatePresence mode="wait">
               {ticketStatus === 'completed' ? (
@@ -299,7 +306,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                   <CheckCircle2 className="w-14 h-14 text-neon-purple mx-auto animate-bounce" />
                   <h3 className="text-lg font-bold font-display text-neon-purple neon-glow-purple">Tickets Added!</h3>
                   <p className="text-xs text-slate-400 font-mono">
-                    +{packSize} tournament tickets. You now hold <strong className="text-white">{profile.tickets}</strong> tickets.
+                    You now hold <strong className="text-white">{profile.tickets}</strong> tournament tickets.
                   </p>
                 </motion.div>
               ) : (
@@ -324,27 +331,69 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                     )}
                   </div>
 
-                  {/* Pack offer */}
-                  <div className="bg-gradient-to-br from-neon-purple/10 to-slate-950 border border-neon-purple/30 rounded-2xl p-5 relative overflow-hidden">
+                  {/* Quantity picker */}
+                  <div className="bg-gradient-to-br from-neon-purple/10 to-slate-950 border border-neon-purple/30 rounded-2xl p-5 relative overflow-hidden space-y-4">
                     <div className="absolute -top-8 -right-8 w-24 h-24 bg-neon-purple/10 rounded-full blur-2xl" />
                     <div className="flex items-center justify-between relative">
                       <div>
-                        <h3 className="text-md font-bold font-display text-white">Tournament Ticket Pack</h3>
+                        <h3 className="text-md font-bold font-display text-white">Buy Tournament Tickets</h3>
                         <p className="text-[11px] text-slate-400 font-mono mt-1">
-                          {packSize} tickets · one ticket = one tournament entry
+                          {formatNaira(unitPrice)} / ticket · one ticket = one entry
                         </p>
                       </div>
-                      <div className="text-right">
-                        <span className="text-2xl font-black font-display text-neon-green neon-glow-green block">{formatNaira(packPrice)}</span>
-                        <span className="text-[9px] font-mono text-slate-500">{formatNaira(packPrice / packSize)} / ticket</span>
+                    </div>
+
+                    <div className="relative">
+                      <label className="block text-[10px] font-mono text-slate-400 mb-1.5 uppercase tracking-wide">
+                        Quantity ({minQty}–{maxQty})
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => { setTicketError(''); setTicketQty(q => clampQty(q - 1)); }}
+                          className="w-10 h-10 flex-shrink-0 rounded-lg bg-slate-900 border border-slate-800 text-white font-bold text-lg hover:border-neon-purple/60 disabled:opacity-40"
+                          disabled={ticketQty <= minQty}
+                        >−</button>
+                        <input
+                          type="number"
+                          value={ticketQty}
+                          min={minQty}
+                          max={maxQty}
+                          onChange={(e) => { setTicketError(''); setTicketQty(clampQty(Number(e.target.value))); }}
+                          className="flex-1 min-w-0 bg-slate-900 border border-slate-800 rounded-lg py-2 px-3 font-mono text-sm text-white text-center focus:outline-none focus:border-neon-purple/60"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => { setTicketError(''); setTicketQty(q => clampQty(q + 1)); }}
+                          className="w-10 h-10 flex-shrink-0 rounded-lg bg-slate-900 border border-slate-800 text-white font-bold text-lg hover:border-neon-purple/60 disabled:opacity-40"
+                          disabled={ticketQty >= maxQty}
+                        >+</button>
                       </div>
+                      {/* Quick amounts */}
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {[minQty, 10, 20, 32, maxQty].filter((v, i, a) => v >= minQty && v <= maxQty && a.indexOf(v) === i).map(v => (
+                          <button
+                            key={v}
+                            type="button"
+                            onClick={() => { setTicketError(''); setTicketQty(v); }}
+                            className={`px-2.5 py-1 rounded-md font-mono text-[10px] font-bold border transition-all ${
+                              ticketQty === v ? 'border-neon-purple bg-neon-purple/10 text-neon-purple' : 'border-slate-800 bg-slate-900/50 text-slate-400 hover:text-white'
+                            }`}
+                          >{v}</button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between border-t border-slate-800 pt-3 relative">
+                      <span className="text-[11px] font-mono text-slate-400">Total</span>
+                      <span className="text-2xl font-black font-display text-neon-green neon-glow-green">{formatNaira(totalCost)}</span>
                     </div>
                   </div>
 
                   {/* Wallet balance context */}
                   <div className="flex items-center justify-between font-mono text-xs px-1">
                     <span className="text-slate-500">Wallet Balance</span>
-                    <span className={`font-bold ${profile.balance >= packPrice ? 'text-neon-green' : 'text-red-400'}`}>
+                    <span className={`font-bold ${profile.balance >= totalCost ? 'text-neon-green' : 'text-red-400'}`}>
                       {formatNaira(profile.balance)}
                     </span>
                   </div>
@@ -356,12 +405,12 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                     </div>
                   )}
 
-                  {profile.balance < packPrice ? (
+                  {profile.balance < totalCost ? (
                     <button
                       onClick={() => setActiveTab('deposit')}
                       className="w-full py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-dark-bg font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(0,255,102,0.3)]"
                     >
-                      Add Funds to Buy ({formatNaira(packPrice)} needed)
+                      Add Funds to Buy ({formatNaira(totalCost)} needed)
                     </button>
                   ) : (
                     <button
@@ -372,7 +421,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                       {ticketStatus === 'processing' ? (
                         <><Loader2 className="w-4 h-4 animate-spin" /> Processing Payment...</>
                       ) : (
-                        <>Buy {packSize} Tickets · {formatNaira(packPrice)}</>
+                        <>Buy {ticketQty} Tickets · {formatNaira(totalCost)}</>
                       )}
                     </button>
                   )}

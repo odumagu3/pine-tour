@@ -92,21 +92,29 @@ function addTransaction(email: string, tx: Transaction): void {
 // Loaded from Supabase at boot and written through on every admin save. These
 // defaults are used before the first load and if persistence is unavailable.
 // Controls arena, sponsor/prize, ticket economy and gameplay rules.
+//
+// Money model notes:
+//   • The single active tournament reuses `fixedSponsorName` + `fixedPrize`.
+//     A tournament is "active" only when BOTH are set (name non-empty, prize > 0).
+//     Clear the sponsor name to show players "no tournaments available".
+//   • `ticketPackPrice` is the PRICE PER TICKET; players buy any quantity between
+//     MIN_TICKETS and MAX_TICKETS. `ticketPackSize`/`prizeMode`/`sponsorPool`/
+//     `prizeMin`/`prizeMax` are legacy columns kept only for schema compatibility.
 // -----------------------------------------------------------------------------
+const MIN_TICKETS = 4;   // fewest tickets a player may buy at once
+const MAX_TICKETS = 64;  // most tickets a player may buy at once
+
 const adminConfig: AdminConfig = {
   arenaName: 'Neon Whot! Bet',
-  defaultRoomId: 'VaporSuite',
-  prizeMode: 'random',
+  defaultRoomId: 'Pine Arena',
+  prizeMode: 'fixed',
   fixedSponsorName: 'IgniTech',
   fixedPrize: 100000,
-  sponsorPool: [
-    'MTN Naija', 'Glo Mobile', 'Airtel Africa', 'Dangote Group',
-    'GTBank', 'Jumia', 'Paystack', 'Bet9ja', 'Flutterwave', 'Indomie',
-  ],
-  prizeMin: 25000,
-  prizeMax: 200000,
-  ticketPackPrice: 3800,
-  ticketPackSize: 8,
+  sponsorPool: [],
+  prizeMin: 0,
+  prizeMax: 0,
+  ticketPackPrice: 300, // ₦ per ticket
+  ticketPackSize: 1,
   freeGameEnabled: true,
   turnTimerSeconds: 20,
   maxPlayers: 4,
@@ -119,29 +127,44 @@ function isAdminEmail(email: string): boolean {
   return adminConfig.adminEmails.map(e => e.toLowerCase()).includes((email || '').toLowerCase().trim());
 }
 
-// Public-safe view of the config (never leaks the passcode; adminEmails only for admins).
-function publicConfig(email?: string) {
-  const admin = email ? isAdminEmail(email) : false;
-  const { adminPasscode, adminEmails, ...rest } = adminConfig;
+// A tournament is only "active" when the admin has set BOTH a sponsor name and
+// a positive cash prize. Otherwise players are shown "no tournaments available".
+function isTournamentActive(): boolean {
+  return adminConfig.fixedSponsorName.trim().length > 0 && adminConfig.fixedPrize > 0;
+}
+
+// The single, admin-controlled tournament (no random sponsors). When inactive,
+// returns an empty sponsor and zero prize.
+function currentTournament(): { sponsorName: string; prize: number; active: boolean } {
+  const active = isTournamentActive();
   return {
-    ...rest,
-    isAdmin: admin,
-    ...(admin ? { adminEmails } : {}),
+    sponsorName: active ? adminConfig.fixedSponsorName.trim() : '',
+    prize: active ? adminConfig.fixedPrize : 0,
+    active,
   };
 }
 
-// Generate a sponsored tournament honoring the admin's prize mode + values.
-function generateSponsoredTournament(): { sponsorName: string; prize: number } {
-  if (adminConfig.prizeMode === 'fixed') {
-    return { sponsorName: adminConfig.fixedSponsorName, prize: adminConfig.fixedPrize };
-  }
-  const pool = adminConfig.sponsorPool.length ? adminConfig.sponsorPool : ['Sponsor'];
-  const sponsorName = pool[Math.floor(Math.random() * pool.length)];
-  const min = Math.min(adminConfig.prizeMin, adminConfig.prizeMax);
-  const max = Math.max(adminConfig.prizeMin, adminConfig.prizeMax);
-  const raw = min + Math.random() * (max - min);
-  const prize = Math.round(raw / 5000) * 5000;
-  return { sponsorName, prize };
+// Public-safe view of the config (never leaks the passcode). Exposes clean,
+// purpose-named fields the frontend consumes; adminEmails only for admins.
+function publicConfig(email?: string) {
+  const admin = email ? isAdminEmail(email) : false;
+  const t = currentTournament();
+  const base = {
+    arenaName: adminConfig.arenaName,
+    roomName: adminConfig.defaultRoomId,
+    tournamentActive: t.active,
+    sponsorName: t.sponsorName,
+    sponsorPrize: t.prize,
+    ticketPrice: adminConfig.ticketPackPrice,
+    minTickets: MIN_TICKETS,
+    maxTickets: MAX_TICKETS,
+    freeGameEnabled: adminConfig.freeGameEnabled,
+    turnTimerSeconds: adminConfig.turnTimerSeconds,
+    maxPlayers: adminConfig.maxPlayers,
+    autoBotFill: adminConfig.autoBotFill,
+    isAdmin: admin,
+  };
+  return admin ? { ...base, adminEmails: adminConfig.adminEmails } : base;
 }
 
 // Generate standard 54-card Whot! Deck
@@ -229,7 +252,7 @@ function drawCardsFromMarket(room: GameState, count: number): WhotCard[] {
 // Initialize a default room or return existing
 function getOrCreateRoom(roomId: string): GameState {
   if (!gameRooms[roomId]) {
-    const sponsored = generateSponsoredTournament();
+    const sponsored = currentTournament();
     gameRooms[roomId] = {
       roomId,
       status: 'waiting',
@@ -239,7 +262,9 @@ function getOrCreateRoom(roomId: string): GameState {
       logs: [
         {
           id: 'log_' + Date.now(),
-          message: `🎟️ ${sponsored.sponsorName} Tournament open at table "${roomId}" — ₦${sponsored.prize.toLocaleString('en-NG')} cash prize. Enter to play!`,
+          message: sponsored.active
+            ? `🎟️ ${sponsored.sponsorName} Tournament open at "${roomId}" — ₦${sponsored.prize.toLocaleString('en-NG')} cash prize. Enter to play!`
+            : `🎟️ Arena "${roomId}" is open. Waiting for the next tournament to be announced.`,
           type: 'system',
           timestamp: new Date().toISOString(),
         }
@@ -259,17 +284,27 @@ function getOrCreateRoom(roomId: string): GameState {
   return gameRooms[roomId];
 }
 
-// Fill remaining empty seats (up to the configured max) with AI bots.
+// Human-sounding opponent names. Bots are an implementation detail — to players
+// these seats look and read exactly like other people at the table.
+const OPPONENT_NAMES = [
+  'Chidi', 'Amara', 'Tunde', 'Zainab', 'Emeka', 'Ngozi', 'Bola', 'Sadiq',
+  'Ifeanyi', 'Yemi', 'Uche', 'Kemi', 'David', 'Grace', 'Musa', 'Chioma',
+  'Damilola', 'Femi', 'Aisha', 'Obinna',
+];
+
+// Fill remaining empty seats (up to the configured max) with opponents.
 function fillSeatsWithBots(room: GameState) {
   if (!adminConfig.autoBotFill) return;
   const colors: PlayerColor[] = ['red', 'green', 'yellow', 'blue'];
-  const botNames = ['CardMatrix', 'WhotEngine', 'VaporDealer', 'DeckShuffler'];
   const cap = Math.min(Math.max(adminConfig.maxPlayers, 2), 4);
   while (room.players.length < cap) {
     const assigned = room.players.map(p => p.color).filter(Boolean) as PlayerColor[];
     const color = colors.find(c => !assigned.includes(c));
     if (!color) break;
-    const name = botNames[room.players.length] || `Bot_${room.players.length}`;
+    // Pick a human name not already seated at this table.
+    const taken = new Set(room.players.map(p => p.name));
+    const name = OPPONENT_NAMES.find(n => !taken.has(n))
+      || OPPONENT_NAMES[Math.floor(Math.random() * OPPONENT_NAMES.length)];
     room.players.push({
       id: 'bot_' + color,
       name,
@@ -285,8 +320,8 @@ function fillSeatsWithBots(room: GameState) {
       totalRollsCount: 0,
     });
     room.logs.push({
-      id: 'log_bot_join_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5),
-      message: `🤖 ${name} seated to fill the tournament table.`,
+      id: 'log_join_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5),
+      message: `👤 ${name} seated on the ${color.toUpperCase()} seat!`,
       type: 'info',
       timestamp: new Date().toISOString(),
     });
@@ -319,8 +354,8 @@ function resetRoomForNewTournament(room: GameState) {
   (room as any).drawPile = [];
   room.drawPileCount = 0;
   room.antiCheatLog = [];
-  // Fresh sponsor + prize for the new tournament.
-  const sponsored = generateSponsoredTournament();
+  // Re-lock the current admin tournament for the new round.
+  const sponsored = currentTournament();
   room.sponsorName = sponsored.sponsorName;
   room.sponsorPrize = sponsored.prize;
   room.pot = sponsored.prize;
@@ -334,7 +369,9 @@ function resetRoomForNewTournament(room: GameState) {
   });
   room.logs.push({
     id: 'log_reset_' + Date.now(),
-    message: `🔄 New ${sponsored.sponsorName} Tournament open — ₦${sponsored.prize.toLocaleString('en-NG')} cash prize. Enter to play!`,
+    message: sponsored.active
+      ? `🔄 New ${sponsored.sponsorName} Tournament open — ₦${sponsored.prize.toLocaleString('en-NG')} cash prize. Enter to play!`
+      : `🔄 Tournament ended. Waiting for the next one to be announced.`,
     type: 'system',
     timestamp: new Date().toISOString(),
   });
@@ -345,7 +382,12 @@ function broadcastRoomState(roomId: string) {
   const state = gameRooms[roomId];
   if (!state) return;
 
-  const payload = JSON.stringify({ type: 'state-sync', state });
+  // Never reveal that a seat is a bot — to players every opponent is a human.
+  const safeState = {
+    ...state,
+    players: state.players.map(p => ({ ...p, isBot: false })),
+  };
+  const payload = JSON.stringify({ type: 'state-sync', state: safeState });
   Object.keys(activeConnections).forEach(connId => {
     const conn = activeConnections[connId];
     if (conn.roomId === roomId && conn.ws.readyState === WebSocket.OPEN) {
@@ -807,34 +849,43 @@ app.post('/api/profile/deposit', async (req, res) => {
   res.json({ success: true, transaction: newTx, balance: profile.balance });
 });
 
-// 2b. POST Buy a tournament ticket pack (8 tickets for ₦3,800, debited from wallet)
+// 2b. POST Buy tournament tickets — any quantity between MIN_TICKETS and
+// MAX_TICKETS, priced per ticket and debited from the wallet.
 app.post('/api/profile/buy-tickets', async (req, res) => {
-  const { email } = req.body;
+  const { email, quantity } = req.body;
   if (!email) {
     return res.status(400).json({ error: 'Missing account email.' });
   }
 
-  const profile = await ensureProfile(email);
-  const packPrice = adminConfig.ticketPackPrice;
-  const packSize = adminConfig.ticketPackSize;
-
-  if (profile.balance < packPrice) {
+  // Validate quantity: integer within [MIN_TICKETS, MAX_TICKETS].
+  const qty = Math.floor(Number(quantity));
+  if (isNaN(qty) || qty < MIN_TICKETS || qty > MAX_TICKETS) {
     return res.status(400).json({
-      error: `Insufficient balance. A ticket pack costs ₦${packPrice.toLocaleString('en-NG')}. Add funds first.`,
+      error: `Choose between ${MIN_TICKETS} and ${MAX_TICKETS} tickets.`,
     });
   }
 
-  profile.balance -= packPrice;
-  profile.tickets += packSize;
+  const profile = await ensureProfile(email);
+  const unitPrice = adminConfig.ticketPackPrice; // price per ticket
+  const cost = unitPrice * qty;
+
+  if (profile.balance < cost) {
+    return res.status(400).json({
+      error: `Insufficient balance. ${qty} tickets cost ₦${cost.toLocaleString('en-NG')}. Add funds first.`,
+    });
+  }
+
+  profile.balance -= cost;
+  profile.tickets += qty;
 
   const newTx: Transaction = {
     id: generateHash(),
     type: 'ticket',
-    amount: packPrice,
+    amount: cost,
     status: 'completed',
     timestamp: new Date().toISOString(),
-    method: `Tournament Ticket Pack ×${packSize}`,
-    txHash: 'tx_pack_' + Math.random().toString(36).substring(2, 10),
+    method: `Tournament Tickets ×${qty}`,
+    txHash: 'tx_tkt_' + Math.random().toString(36).substring(2, 10),
     balanceAfter: profile.balance,
   };
   addTransaction(email, newTx);
@@ -875,22 +926,20 @@ app.post('/api/admin/config', async (req, res) => {
     return isNaN(n) ? fb : Math.min(Math.max(n, min), max);
   };
 
-  // Arena
+  // Arena & room (accept new `roomName` key, fall back to legacy `defaultRoomId`).
   adminConfig.arenaName = str(config.arenaName, adminConfig.arenaName);
-  adminConfig.defaultRoomId = str(config.defaultRoomId, adminConfig.defaultRoomId);
-  // Sponsor & prize
-  if (config.prizeMode === 'fixed' || config.prizeMode === 'random') adminConfig.prizeMode = config.prizeMode;
-  adminConfig.fixedSponsorName = str(config.fixedSponsorName, adminConfig.fixedSponsorName);
-  adminConfig.fixedPrize = num(config.fixedPrize, adminConfig.fixedPrize, 0, 100000000);
-  if (Array.isArray(config.sponsorPool)) {
-    const cleaned = config.sponsorPool.map((s: any) => String(s).trim()).filter(Boolean);
-    if (cleaned.length) adminConfig.sponsorPool = cleaned;
-  }
-  adminConfig.prizeMin = num(config.prizeMin, adminConfig.prizeMin, 0, 100000000);
-  adminConfig.prizeMax = num(config.prizeMax, adminConfig.prizeMax, 0, 100000000);
-  // Ticket economy
-  adminConfig.ticketPackPrice = num(config.ticketPackPrice, adminConfig.ticketPackPrice, 0, 100000000);
-  adminConfig.ticketPackSize = num(config.ticketPackSize, adminConfig.ticketPackSize, 1, 1000);
+  adminConfig.defaultRoomId = str(config.roomName ?? config.defaultRoomId, adminConfig.defaultRoomId);
+
+  // Single tournament: sponsor name + cash prize. The sponsor MAY be cleared
+  // (empty string) to deactivate the tournament, so set it directly when a
+  // string is provided rather than falling back to the previous value.
+  adminConfig.prizeMode = 'fixed';
+  const sponsorIn = config.sponsorName ?? config.fixedSponsorName;
+  if (typeof sponsorIn === 'string') adminConfig.fixedSponsorName = sponsorIn.trim();
+  adminConfig.fixedPrize = num(config.sponsorPrize ?? config.fixedPrize, adminConfig.fixedPrize, 0, 100000000);
+
+  // Ticket economy: `ticketPrice` is the price per ticket.
+  adminConfig.ticketPackPrice = num(config.ticketPrice ?? config.ticketPackPrice, adminConfig.ticketPackPrice, 0, 100000000);
   if (typeof config.freeGameEnabled === 'boolean') adminConfig.freeGameEnabled = config.freeGameEnabled;
   // Gameplay
   adminConfig.turnTimerSeconds = num(config.turnTimerSeconds, adminConfig.turnTimerSeconds, 5, 120);
@@ -908,11 +957,12 @@ app.post('/api/admin/config', async (req, res) => {
   // Write the updated config through to Supabase so it survives restarts.
   await saveAdminConfig(adminConfig);
 
-  // Apply new sponsor/prize live to any open (not-yet-started) tables.
+  // Apply the current tournament live to any open (not-yet-started) table and
+  // push it to every connected client so all devices stay in sync immediately.
+  const t = currentTournament();
   Object.keys(gameRooms).forEach(roomId => {
     const room = gameRooms[roomId];
     if (room && (room.status === 'waiting' || room.status === 'betting')) {
-      const t = generateSponsoredTournament();
       room.sponsorName = t.sponsorName;
       room.sponsorPrize = t.prize;
       room.pot = t.prize;
@@ -1021,7 +1071,19 @@ wss.on('connection', async (ws: WebSocket, req) => {
   const urlParams = new URLSearchParams(req.url?.split('?')[1] || '');
   const userEmail = (urlParams.get('email') || 'hudozit@gmail.com').toLowerCase().trim();
   const userName = urlParams.get('name') || 'VoltGamer';
-  const userRoomId = urlParams.get('roomId') || 'VaporSuite';
+  // Everyone plays in the single admin-controlled arena room; the client's
+  // roomId is ignored so all players share one consistent table.
+  const userRoomId = adminConfig.defaultRoomId;
+
+  // No tournament configured → no entry. Players see "no tournaments available".
+  if (!isTournamentActive()) {
+    ws.send(JSON.stringify({
+      type: 'error',
+      message: 'No tournaments available right now. Please check back soon.',
+    }));
+    ws.close();
+    return;
+  }
 
   const connId = `${userEmail}_${Date.now()}`;
   activeConnections[connId] = { ws, email: userEmail, roomId: userRoomId };
@@ -1033,8 +1095,8 @@ wss.on('connection', async (ws: WebSocket, req) => {
   if (!playerObj) {
     if (state.players.length >= Math.min(Math.max(adminConfig.maxPlayers, 2), 4)) {
       ws.send(JSON.stringify({
-        type: 'error', 
-        message: 'Table is full. Max 4 players allowed. Try joining another custom Table Room Name!' 
+        type: 'error',
+        message: 'This tournament table is full. Please try again shortly.'
       }));
       delete activeConnections[connId];
       ws.close();
@@ -1118,13 +1180,19 @@ wss.on('connection', async (ws: WebSocket, req) => {
           return;
         }
 
-        // Safety: ensure a sponsor/prize is locked in for this tournament.
-        if (!currentRoom.sponsorName) {
-          const t = generateSponsoredTournament();
-          currentRoom.sponsorName = t.sponsorName;
-          currentRoom.sponsorPrize = t.prize;
-          currentRoom.pot = t.prize;
+        // A tournament must be active to enter.
+        const active = currentTournament();
+        if (!active.active) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: 'No tournaments available right now. Please check back soon.',
+          }));
+          return;
         }
+        // Lock the current sponsor/prize onto the room.
+        currentRoom.sponsorName = active.sponsorName;
+        currentRoom.sponsorPrize = active.prize;
+        currentRoom.pot = active.prize;
 
         // Entry cost: lifetime free game first (if enabled), then consume a ticket.
         let entryMethod: string;
@@ -1137,7 +1205,7 @@ wss.on('connection', async (ws: WebSocket, req) => {
         } else {
           ws.send(JSON.stringify({
             type: 'error',
-            message: 'No tickets left. Buy a ticket pack (8 for ₦3,800) in the Cashier to enter tournaments.',
+            message: 'You have no tickets left. Buy tickets in the Cashier to enter tournaments.',
           }));
           return;
         }

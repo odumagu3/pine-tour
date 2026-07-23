@@ -44,15 +44,10 @@ const Toggle: React.FC<{ value: boolean; onChange: (v: boolean) => void; label: 
 // Editable shape (everything except isAdmin). adminPasscode is a "new passcode" field.
 interface EditableConfig {
   arenaName: string;
-  defaultRoomId: string;
-  prizeMode: 'fixed' | 'random';
-  fixedSponsorName: string;
-  fixedPrize: number;
-  sponsorPoolText: string; // comma-separated in the form
-  prizeMin: number;
-  prizeMax: number;
-  ticketPackPrice: number;
-  ticketPackSize: number;
+  roomName: string;      // the single arena room name
+  sponsorName: string;   // tournament sponsor ('' = no tournament)
+  sponsorPrize: number;  // tournament cash prize
+  ticketPrice: number;   // price per ticket
   freeGameEnabled: boolean;
   turnTimerSeconds: number;
   maxPlayers: number;
@@ -71,17 +66,14 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
 
   const isAdmin = !!config?.isAdmin;
 
+  // The admin/verify + admin/config responses return the RAW config (legacy
+  // field names), so read from those and map to our simplified form shape.
   const toEditable = (c: any): EditableConfig => ({
     arenaName: c.arenaName ?? '',
-    defaultRoomId: c.defaultRoomId ?? '',
-    prizeMode: c.prizeMode === 'fixed' ? 'fixed' : 'random',
-    fixedSponsorName: c.fixedSponsorName ?? '',
-    fixedPrize: Number(c.fixedPrize ?? 0),
-    sponsorPoolText: Array.isArray(c.sponsorPool) ? c.sponsorPool.join(', ') : '',
-    prizeMin: Number(c.prizeMin ?? 0),
-    prizeMax: Number(c.prizeMax ?? 0),
-    ticketPackPrice: Number(c.ticketPackPrice ?? 0),
-    ticketPackSize: Number(c.ticketPackSize ?? 0),
+    roomName: c.roomName ?? c.defaultRoomId ?? '',
+    sponsorName: c.sponsorName ?? c.fixedSponsorName ?? '',
+    sponsorPrize: Number(c.sponsorPrize ?? c.fixedPrize ?? 0),
+    ticketPrice: Number(c.ticketPrice ?? c.ticketPackPrice ?? 0),
     freeGameEnabled: !!c.freeGameEnabled,
     turnTimerSeconds: Number(c.turnTimerSeconds ?? 20),
     maxPlayers: Number(c.maxPlayers ?? 4),
@@ -125,15 +117,10 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     setSaveStatus('saving');
     const payload = {
       arenaName: form.arenaName,
-      defaultRoomId: form.defaultRoomId,
-      prizeMode: form.prizeMode,
-      fixedSponsorName: form.fixedSponsorName,
-      fixedPrize: form.fixedPrize,
-      sponsorPool: form.sponsorPoolText.split(',').map(s => s.trim()).filter(Boolean),
-      prizeMin: form.prizeMin,
-      prizeMax: form.prizeMax,
-      ticketPackPrice: form.ticketPackPrice,
-      ticketPackSize: form.ticketPackSize,
+      roomName: form.roomName,
+      sponsorName: form.sponsorName.trim(),
+      sponsorPrize: form.sponsorPrize,
+      ticketPrice: form.ticketPrice,
       freeGameEnabled: form.freeGameEnabled,
       turnTimerSeconds: form.turnTimerSeconds,
       maxPlayers: form.maxPlayers,
@@ -270,83 +257,54 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
             <input className={field} value={form.arenaName} onChange={(e) => update('arenaName', e.target.value)} />
           </div>
           <div>
-            <label className={labelCls}>Default Room ID</label>
-            <input className={field} value={form.defaultRoomId} onChange={(e) => update('defaultRoomId', e.target.value)} />
+            <label className={labelCls}>Arena Room Name</label>
+            <input className={field} value={form.roomName} onChange={(e) => update('roomName', e.target.value)} />
+            <p className="text-[10px] text-slate-500 font-mono mt-1">Everyone plays in this one room.</p>
           </div>
         </div>
       </Section>
 
-      {/* Sponsor & prize */}
-      <Section icon={<Trophy className="w-4 h-4" />} title="Sponsor & Cash Prize">
-        <div>
-          <label className={labelCls}>Prize Mode</label>
-          <div className="flex gap-2">
-            {(['fixed', 'random'] as const).map(mode => (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => update('prizeMode', mode)}
-                className={`flex-1 py-2 rounded-lg font-mono text-xs font-bold border transition-all ${
-                  form.prizeMode === mode
-                    ? 'border-neon-purple bg-neon-purple/10 text-neon-purple'
-                    : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-white'
-                }`}
-              >
-                {mode === 'fixed' ? 'Fixed' : 'Random Pool'}
-              </button>
-            ))}
+      {/* Tournament */}
+      <Section icon={<Trophy className="w-4 h-4" />} title="Tournament">
+        {(() => {
+          const active = form.sponsorName.trim().length > 0 && form.sponsorPrize > 0;
+          return (
+            <div className={`flex items-center gap-2 rounded-lg px-3 py-2 border text-[11px] font-mono ${active ? 'border-neon-green/40 bg-neon-green/5 text-neon-green' : 'border-slate-700 bg-slate-900/40 text-slate-400'}`}>
+              <span className={`w-2 h-2 rounded-full ${active ? 'bg-neon-green' : 'bg-slate-500'}`} />
+              {active ? 'Tournament is LIVE — players can enter.' : 'No tournament — players see “No tournaments available”.'}
+            </div>
+          );
+        })()}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className={labelCls}>Sponsor Name</label>
+            <input className={field} value={form.sponsorName} onChange={(e) => update('sponsorName', e.target.value)} placeholder="e.g. IgniTech" />
+          </div>
+          <div>
+            <label className={labelCls}>Cash Prize (₦) — {formatNaira(form.sponsorPrize)}</label>
+            <input type="number" className={field} value={form.sponsorPrize} onChange={(e) => update('sponsorPrize', Number(e.target.value))} min={0} />
           </div>
         </div>
-
-        {form.prizeMode === 'fixed' ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className={labelCls}>Sponsor Name</label>
-              <input className={field} value={form.fixedSponsorName} onChange={(e) => update('fixedSponsorName', e.target.value)} />
-            </div>
-            <div>
-              <label className={labelCls}>Cash Prize (₦) — {formatNaira(form.fixedPrize)}</label>
-              <input type="number" className={field} value={form.fixedPrize} onChange={(e) => update('fixedPrize', Number(e.target.value))} min={0} />
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <div>
-              <label className={labelCls}>Sponsor Pool (comma-separated)</label>
-              <textarea className={`${field} h-20 resize-none`} value={form.sponsorPoolText} onChange={(e) => update('sponsorPoolText', e.target.value)} />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className={labelCls}>Min Prize (₦)</label>
-                <input type="number" className={field} value={form.prizeMin} onChange={(e) => update('prizeMin', Number(e.target.value))} min={0} />
-              </div>
-              <div>
-                <label className={labelCls}>Max Prize (₦)</label>
-                <input type="number" className={field} value={form.prizeMax} onChange={(e) => update('prizeMax', Number(e.target.value))} min={0} />
-              </div>
-            </div>
-          </div>
-        )}
+        <p className="text-[10px] text-slate-500 font-mono">
+          Set a sponsor name and a prize above 0 to open a tournament. Clear the sponsor name (or set the prize to 0) to close all tournaments.
+        </p>
       </Section>
 
       {/* Ticket economy */}
       <Section icon={<Ticket className="w-4 h-4" />} title="Ticket Economy">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
-            <label className={labelCls}>Pack Price (₦) — {formatNaira(form.ticketPackPrice)}</label>
-            <input type="number" className={field} value={form.ticketPackPrice} onChange={(e) => update('ticketPackPrice', Number(e.target.value))} min={0} />
+            <label className={labelCls}>Price per Ticket (₦) — {formatNaira(form.ticketPrice)}</label>
+            <input type="number" className={field} value={form.ticketPrice} onChange={(e) => update('ticketPrice', Number(e.target.value))} min={0} />
           </div>
           <div>
-            <label className={labelCls}>Tickets per Pack</label>
-            <input type="number" className={field} value={form.ticketPackSize} onChange={(e) => update('ticketPackSize', Number(e.target.value))} min={1} />
+            <label className={labelCls}>Purchase Limits</label>
+            <div className="w-full bg-slate-900/40 border border-slate-800 rounded-lg py-2 px-3 font-mono text-xs text-slate-400">
+              Players buy 4–64 tickets
+            </div>
           </div>
         </div>
         <Toggle value={form.freeGameEnabled} onChange={(v) => update('freeGameEnabled', v)} label="Give new players 1 free game" />
-        {form.ticketPackSize > 0 && (
-          <p className="text-[10px] text-slate-500 font-mono">
-            = {formatNaira(form.ticketPackPrice / form.ticketPackSize)} per ticket
-          </p>
-        )}
       </Section>
 
       {/* Gameplay */}
@@ -363,7 +321,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
             </select>
           </div>
         </div>
-        <Toggle value={form.autoBotFill} onChange={(v) => update('autoBotFill', v)} label="Auto-fill empty seats with bots" />
+        <Toggle value={form.autoBotFill} onChange={(v) => update('autoBotFill', v)} label="Auto-fill empty seats with AI opponents" />
       </Section>
 
       {/* Access control */}

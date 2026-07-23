@@ -94,24 +94,22 @@ export interface UserProfile {
   history: Transaction[];
 }
 
+// Public app config the frontend consumes (served by /api/config).
 export interface PublicConfig {
   arenaName: string;
-  defaultRoomId: string;
-  prizeMode: 'fixed' | 'random';
-  fixedSponsorName: string;
-  fixedPrize: number;
-  sponsorPool: string[];
-  prizeMin: number;
-  prizeMax: number;
-  ticketPackPrice: number;
-  ticketPackSize: number;
+  roomName: string;           // the single arena room name (admin-controlled)
+  tournamentActive: boolean;  // false → show "no tournaments available"
+  sponsorName: string;        // current tournament sponsor ('' when inactive)
+  sponsorPrize: number;       // current cash prize (0 when inactive)
+  ticketPrice: number;        // price per ticket (₦)
+  minTickets: number;         // fewest tickets buyable at once
+  maxTickets: number;         // most tickets buyable at once
   freeGameEnabled: boolean;
   turnTimerSeconds: number;
   maxPlayers: number;
   autoBotFill: boolean;
   isAdmin?: boolean;
   adminEmails?: string[]; // only present in admin-authenticated responses
-  adminPasscode?: string; // never returned by the server; used client-side only when editing
 }
 
 export interface ChatMessage {
