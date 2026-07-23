@@ -214,7 +214,9 @@ function drawCardsFromMarket(room: GameState, count: number): WhotCard[] {
 
   for (let i = 0; i < count; i++) {
     if (drawPile.length === 0) {
-      // Recycle discard pile except top card
+      // Refill the market by recycling the discard pile (keep the top card in
+      // play). A Whot deck is only 54 cards total — we NEVER mint new ones, so
+      // hands can't grow without bound.
       if (room.discardPile.length > 1) {
         const topCard = room.discardPile.pop()!;
         const recycled = [...room.discardPile];
@@ -234,9 +236,10 @@ function drawCardsFromMarket(room: GameState, count: number): WhotCard[] {
           timestamp: new Date().toISOString(),
         });
       } else {
-        // Fallback generate fresh deck
-        const newDeck = createWhotDeck();
-        drawPile.push(...newDeck);
+        // Nothing left to draw anywhere — the whole 54-card deck is in players'
+        // hands. Stop here (the player draws fewer/no cards) rather than minting
+        // a new deck, which previously caused unlimited cards.
+        break;
       }
     }
 
