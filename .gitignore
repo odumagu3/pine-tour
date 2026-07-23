@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Supabase CLI local temp/link state
+supabase/.temp/

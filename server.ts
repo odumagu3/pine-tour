@@ -1,18 +1,45 @@
+// MUST be first: populates process.env from .env.local before db.ts reads it.
+import './src/load-env.js';
 import express from 'express';
 import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GameState, Player, PlayerColor, WhotCard, CardSuit, GameLog, Transaction, UserProfile, AntiCheatAlert } from './src/types.js';
+import {
+  AdminConfig,
+  loadAdminConfig, saveAdminConfig,
+  loadProfile, persistProfile, recordTransaction, deleteProfile,
+} from './src/db.js';
 
 const PORT = Number(process.env.PORT) || 5174;
 const app = express();
 app.use(express.json());
 
+// CORS — in Option B the frontend (Vercel) and this backend (Render) are on
+// different origins. FRONTEND_ORIGIN is a comma-separated allowlist; it defaults
+// to '*' so local dev and same-origin serving keep working unchanged.
+const allowedOrigins = (process.env.FRONTEND_ORIGIN || '*').split(',').map(s => s.trim()).filter(Boolean);
+app.use((req, res, next) => {
+  const origin = req.headers.origin || '';
+  if (allowedOrigins.includes('*')) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 // Create HTTP server
 const server = http.createServer(app);
 
-// In-Memory Database for User Profiles and Game Rooms
-const userProfiles: Record<string, UserProfile> = {};
+// In-memory caches. Supabase is the source of truth; profiles are loaded on
+// demand and written through on every mutation. Live game rooms are intentionally
+// ephemeral — an in-progress hand is not meant to survive a server restart.
+const profileCache: Record<string, UserProfile> = {};
 const gameRooms: Record<string, GameState> = {};
 const activeConnections: Record<string, { ws: WebSocket; email: string; roomId: string }> = {};
 
@@ -21,55 +48,51 @@ function generateHash(): string {
   return 'tx_' + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 }
 
-// Helper to initialize a profile
-function getOrCreateProfile(email: string): UserProfile {
+// Async: load a profile from Supabase into the cache if not already present.
+// Call this from REST handlers and on WebSocket connect.
+async function ensureProfile(email: string): Promise<UserProfile> {
   const cleanEmail = email.toLowerCase().trim();
-  if (!userProfiles[cleanEmail]) {
-    userProfiles[cleanEmail] = {
-      email: cleanEmail,
-      balance: 0, // New players start at ₦0
-      totalEarnings: 0,
-      gamesPlayed: 0,
-      gamesWon: 0,
-      highestRoll: 0,
-      tickets: 0, // No tickets yet — first tournament entry is free
-      freeGameUsed: false, // Lifetime free game not yet claimed
-      verificationStatus: 'unverified',
-      verificationDetails: null,
-      history: [],
-    };
+  if (!profileCache[cleanEmail]) {
+    profileCache[cleanEmail] = await loadProfile(cleanEmail);
   }
-  return userProfiles[cleanEmail];
+  return profileCache[cleanEmail];
+}
+
+// Synchronous cache accessor for hot game-loop paths. Humans are always loaded
+// via ensureProfile() when they connect, so they are present here. If somehow
+// missing, returns a fresh object and kicks off an async reload.
+function getProfile(email: string): UserProfile {
+  const cleanEmail = email.toLowerCase().trim();
+  if (!profileCache[cleanEmail]) {
+    profileCache[cleanEmail] = {
+      email: cleanEmail, balance: 0, totalEarnings: 0, gamesPlayed: 0, gamesWon: 0,
+      highestRoll: 0, tickets: 0, freeGameUsed: false, verificationStatus: 'unverified',
+      verificationDetails: null, history: [],
+    };
+    ensureProfile(cleanEmail).catch(() => {});
+  }
+  return profileCache[cleanEmail];
+}
+
+// Fire-and-forget write-through of a cached profile to Supabase.
+function saveProfile(email: string): void {
+  const p = profileCache[email.toLowerCase().trim()];
+  if (p) persistProfile(p).catch(err => console.error('saveProfile:', err));
+}
+
+// Append a ledger entry to the cached history AND persist it to Supabase.
+function addTransaction(email: string, tx: Transaction): void {
+  const p = profileCache[email.toLowerCase().trim()];
+  if (p) p.history.unshift(tx);
+  recordTransaction(email, tx).catch(err => console.error('addTransaction:', err));
 }
 
 // -----------------------------------------------------------------------------
-// ADMIN CONFIGURATION (authoritative, in-memory)
+// ADMIN CONFIGURATION (in-memory cache; Supabase is the source of truth).
+// Loaded from Supabase at boot and written through on every admin save. These
+// defaults are used before the first load and if persistence is unavailable.
 // Controls arena, sponsor/prize, ticket economy and gameplay rules.
 // -----------------------------------------------------------------------------
-interface AdminConfig {
-  // Arena / room
-  arenaName: string;
-  defaultRoomId: string;
-  // Sponsor & prize
-  prizeMode: 'fixed' | 'random';
-  fixedSponsorName: string;
-  fixedPrize: number;
-  sponsorPool: string[];
-  prizeMin: number;
-  prizeMax: number;
-  // Ticket economy
-  ticketPackPrice: number;
-  ticketPackSize: number;
-  freeGameEnabled: boolean;
-  // Gameplay
-  turnTimerSeconds: number;
-  maxPlayers: number;
-  autoBotFill: boolean;
-  // Access control
-  adminEmails: string[];
-  adminPasscode: string;
-}
-
 const adminConfig: AdminConfig = {
   arenaName: 'Neon Whot! Bet',
   defaultRoomId: 'VaporSuite',
@@ -360,11 +383,11 @@ function endWhotGame(roomId: string, winnerId: string) {
 
   // Credit winner profile with the sponsor's cash prize
   if (winner && !winner.isBot) {
-    const profile = getOrCreateProfile(winner.id);
+    const profile = getProfile(winner.id);
     profile.balance += prizeAmount;
     profile.totalEarnings += prizeAmount;
     profile.gamesWon += 1;
-    profile.history.unshift({
+    addTransaction(winner.id, {
       id: generateHash(),
       type: 'win',
       amount: prizeAmount,
@@ -374,13 +397,15 @@ function endWhotGame(roomId: string, winnerId: string) {
       txHash: 'hash_win_' + Math.random().toString(36).substring(2, 9),
       balanceAfter: profile.balance,
     });
+    saveProfile(winner.id);
   }
 
   // Update stats for all players
   room.players.forEach(p => {
     if (!p.isBot) {
-      const profile = getOrCreateProfile(p.id);
+      const profile = getProfile(p.id);
       profile.gamesPlayed += 1;
+      saveProfile(p.id);
     }
   });
 
@@ -746,24 +771,24 @@ function startWhotGameSession(room: GameState) {
 // -----------------------------------------------------------------------------
 
 // 1. GET User Profile
-app.get('/api/profile', (req, res) => {
+app.get('/api/profile', async (req, res) => {
   const email = (req.query.email as string) || 'hudozit@gmail.com';
-  const profile = getOrCreateProfile(email);
+  const profile = await ensureProfile(email);
   res.json(profile);
 });
 
 // 2. POST Simulated Payment Deposit
-app.post('/api/profile/deposit', (req, res) => {
+app.post('/api/profile/deposit', async (req, res) => {
   const { email, amount, method } = req.body;
-  
+
   if (!email || !amount || isNaN(amount) || amount <= 0) {
     return res.status(400).json({ error: 'Invalid deposit details' });
   }
 
-  const profile = getOrCreateProfile(email);
+  const profile = await ensureProfile(email);
   const txId = generateHash();
   const txHash = 'tx_chain_' + Math.random().toString(36).substring(2, 10);
-  
+
   const newTx: Transaction = {
     id: txId,
     type: 'deposit',
@@ -776,19 +801,20 @@ app.post('/api/profile/deposit', (req, res) => {
   };
 
   profile.balance += parseFloat(amount);
-  profile.history.unshift(newTx);
+  addTransaction(email, newTx);
+  saveProfile(email);
 
   res.json({ success: true, transaction: newTx, balance: profile.balance });
 });
 
 // 2b. POST Buy a tournament ticket pack (8 tickets for ₦3,800, debited from wallet)
-app.post('/api/profile/buy-tickets', (req, res) => {
+app.post('/api/profile/buy-tickets', async (req, res) => {
   const { email } = req.body;
   if (!email) {
     return res.status(400).json({ error: 'Missing account email.' });
   }
 
-  const profile = getOrCreateProfile(email);
+  const profile = await ensureProfile(email);
   const packPrice = adminConfig.ticketPackPrice;
   const packSize = adminConfig.ticketPackSize;
 
@@ -811,7 +837,8 @@ app.post('/api/profile/buy-tickets', (req, res) => {
     txHash: 'tx_pack_' + Math.random().toString(36).substring(2, 10),
     balanceAfter: profile.balance,
   };
-  profile.history.unshift(newTx);
+  addTransaction(email, newTx);
+  saveProfile(email);
 
   res.json({ success: true, tickets: profile.tickets, balance: profile.balance, transaction: newTx });
 });
@@ -833,7 +860,7 @@ app.post('/api/admin/verify', (req, res) => {
 });
 
 // 2e. POST update admin config (email + passcode required)
-app.post('/api/admin/config', (req, res) => {
+app.post('/api/admin/config', async (req, res) => {
   const { email, passcode, config } = req.body;
   if (!isAdminEmail(email) || passcode !== adminConfig.adminPasscode) {
     return res.status(401).json({ error: 'Invalid admin email or passcode.' });
@@ -878,6 +905,9 @@ app.post('/api/admin/config', (req, res) => {
     adminConfig.adminPasscode = config.adminPasscode.trim();
   }
 
+  // Write the updated config through to Supabase so it survives restarts.
+  await saveAdminConfig(adminConfig);
+
   // Apply new sponsor/prize live to any open (not-yet-started) tables.
   Object.keys(gameRooms).forEach(roomId => {
     const room = gameRooms[roomId];
@@ -895,14 +925,14 @@ app.post('/api/admin/config', (req, res) => {
 });
 
 // 3. POST Simulated Withdrawal Portal (For verified users)
-app.post('/api/profile/withdraw', (req, res) => {
+app.post('/api/profile/withdraw', async (req, res) => {
   const { email, amount, method, pin } = req.body;
 
   if (!email || !amount || isNaN(amount) || amount <= 0) {
     return res.status(400).json({ error: 'Invalid withdrawal details' });
   }
 
-  const profile = getOrCreateProfile(email);
+  const profile = await ensureProfile(email);
 
   if (profile.verificationStatus !== 'verified') {
     return res.status(403).json({ error: 'Verification Required: Please submit your KYC documents in the portal before making a withdrawal.' });
@@ -918,7 +948,7 @@ app.post('/api/profile/withdraw', (req, res) => {
 
   const txId = generateHash();
   const txHash = 'tx_chain_' + Math.random().toString(36).substring(2, 10);
-  
+
   profile.balance -= parseFloat(amount);
 
   const newTx: Transaction = {
@@ -932,20 +962,21 @@ app.post('/api/profile/withdraw', (req, res) => {
     balanceAfter: profile.balance,
   };
 
-  profile.history.unshift(newTx);
+  addTransaction(email, newTx);
+  saveProfile(email);
 
   res.json({ success: true, transaction: newTx, balance: profile.balance });
 });
 
 // 4. POST Simulated ID Verification submission (KYC)
-app.post('/api/profile/verify', (req, res) => {
+app.post('/api/profile/verify', async (req, res) => {
   const { email, fullName, idType, idNumber } = req.body;
 
   if (!email || !fullName || !idType || !idNumber) {
     return res.status(400).json({ error: 'All verification fields are required' });
   }
 
-  const profile = getOrCreateProfile(email);
+  const profile = await ensureProfile(email);
   profile.verificationStatus = 'verified';
   profile.verificationDetails = {
     fullName,
@@ -953,24 +984,24 @@ app.post('/api/profile/verify', (req, res) => {
     idNumber: idNumber.replace(/.(?=.{4})/g, '*'),
     submittedAt: new Date().toISOString(),
   };
+  saveProfile(email);
 
   res.json({ success: true, status: 'verified', details: profile.verificationDetails });
 });
 
 // 5. POST Export User Profile (GDPR compliance)
-app.post('/api/profile/export', (req, res) => {
+app.post('/api/profile/export', async (req, res) => {
   const { email } = req.body;
-  const profile = getOrCreateProfile(email);
+  const profile = await ensureProfile(email);
   res.json({ success: true, profileData: profile });
 });
 
 // 6. POST Delete/Purge User Profile (GDPR compliance Right to be Forgotten)
-app.post('/api/profile/delete', (req, res) => {
+app.post('/api/profile/delete', async (req, res) => {
   const { email } = req.body;
   const cleanEmail = (email || '').toLowerCase().trim();
-  if (userProfiles[cleanEmail]) {
-    delete userProfiles[cleanEmail];
-  }
+  delete profileCache[cleanEmail];
+  await deleteProfile(cleanEmail);
   res.json({ success: true, message: 'All personal data associated with your email has been fully purged from database aggregates.' });
 });
 
@@ -986,7 +1017,7 @@ server.on('upgrade', (request, socket, head) => {
   });
 });
 
-wss.on('connection', (ws: WebSocket, req) => {
+wss.on('connection', async (ws: WebSocket, req) => {
   const urlParams = new URLSearchParams(req.url?.split('?')[1] || '');
   const userEmail = (urlParams.get('email') || 'hudozit@gmail.com').toLowerCase().trim();
   const userName = urlParams.get('name') || 'VoltGamer';
@@ -995,7 +1026,7 @@ wss.on('connection', (ws: WebSocket, req) => {
   const connId = `${userEmail}_${Date.now()}`;
   activeConnections[connId] = { ws, email: userEmail, roomId: userRoomId };
 
-  const profile = getOrCreateProfile(userEmail);
+  const profile = await ensureProfile(userEmail);
   const state = getOrCreateRoom(userRoomId);
 
   let playerObj = state.players.find(p => p.id === userEmail);
@@ -1063,7 +1094,8 @@ wss.on('connection', (ws: WebSocket, req) => {
     const actionPlayer = currentRoom.players.find(p => p.id === userEmail);
     if (!actionPlayer) return;
 
-    const freshProfile = getOrCreateProfile(userEmail);
+    // Player is already loaded into the cache from the connect handler.
+    const freshProfile = getProfile(userEmail);
     actionPlayer.balance = freshProfile.balance;
 
     switch (msg.type) {
@@ -1114,6 +1146,8 @@ wss.on('connection', (ws: WebSocket, req) => {
         actionPlayer.balance = freshProfile.balance;
         actionPlayer.ready = true;
         currentRoom.status = 'betting';
+        // Persist the consumed free game / ticket so it survives a restart.
+        saveProfile(userEmail);
 
         currentRoom.logs.push({
           id: 'log_entry_' + Date.now(),
@@ -1321,6 +1355,19 @@ setInterval(() => {
 // VITE DEV SERVER MIDDLEWARE & STATIC SERVING FOR PRODUCTION
 // -----------------------------------------------------------------------------
 async function startServer() {
+  // Load the authoritative admin config from Supabase into the in-memory cache.
+  try {
+    const loaded = await loadAdminConfig();
+    if (loaded) {
+      Object.assign(adminConfig, loaded);
+      console.log('✅ Admin config loaded from Supabase.');
+    } else {
+      console.log('ℹ️  Using default admin config (Supabase not loaded).');
+    }
+  } catch (e) {
+    console.error('Admin config load failed; using defaults.', e);
+  }
+
   if (process.env.NODE_ENV !== 'production') {
     // Vite is a dev-only dependency; load it lazily so production never requires it.
     const { createServer: createViteServer } = await import('vite');

@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
+import type { Session } from '@supabase/supabase-js';
 import { motion, AnimatePresence } from 'motion/react';
 import { GameState, UserProfile, GameLog, ChatMessage, PlayerColor, PublicConfig } from './types.js';
 import GameBoard from './components/GameBoard.tsx';
@@ -6,56 +7,43 @@ import FinancePortal from './components/FinancePortal.tsx';
 import DashboardStats from './components/DashboardStats.tsx';
 import PrivacyPortal from './components/PrivacyPortal.tsx';
 import AdminDashboard from './components/AdminDashboard.tsx';
+import AuthGate from './components/AuthGate.tsx';
 import { InAppNotifications } from './components/InAppNotifications.tsx';
 import { ShieldCheck, MessageSquare, Send, Bell, User, LayoutDashboard, Wallet, Database, Lock, AlertCircle, HelpCircle, Ticket, LogOut, Settings } from 'lucide-react';
 import { formatNaira } from './currency.js';
+import { supabase } from './supabaseClient.js';
+import { apiUrl, wsUrl } from './config.js';
 
-// --- Persisted session (survives refresh for up to 1 hour) ---------------
-const SESSION_KEY = 'whot_session';
-const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
+// --- Lobby preferences (nickname + room) persisted across refreshes -------
+// Identity/auth is handled by Supabase; these are just convenience prefs.
+const PREFS_KEY = 'whot_lobby_prefs';
 
-interface SavedSession {
-  email: string;
-  userName: string;
-  roomId: string;
-  loginAt: number;
-}
+interface LobbyPrefs { userName: string; roomId: string; }
 
-function loadSession(): SavedSession | null {
+function loadPrefs(): LobbyPrefs {
   try {
-    const raw = localStorage.getItem(SESSION_KEY);
-    if (!raw) return null;
-    const s = JSON.parse(raw) as SavedSession;
-    if (!s.email || !s.loginAt) return null;
-    // Expire after the TTL window
-    if (Date.now() - s.loginAt > SESSION_TTL_MS) {
-      localStorage.removeItem(SESSION_KEY);
-      return null;
-    }
-    return s;
-  } catch {
-    return null;
-  }
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (raw) return JSON.parse(raw) as LobbyPrefs;
+  } catch { /* ignore */ }
+  return { userName: 'VoltGamer', roomId: 'VaporSuite' };
 }
 
-function saveSession(s: Omit<SavedSession, 'loginAt'>) {
-  localStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, loginAt: Date.now() }));
-}
-
-function clearSession() {
-  localStorage.removeItem(SESSION_KEY);
+function savePrefs(p: LobbyPrefs) {
+  localStorage.setItem(PREFS_KEY, JSON.stringify(p));
 }
 
 export default function App() {
-  // Restore a previous session (if still within the 1-hour window) so the
-  // player isn't forced back to the login screen on every refresh.
-  const [initialSession] = useState(loadSession);
+  const [prefs] = useState(loadPrefs);
 
-  // Session details
-  const [email, setEmail] = useState(initialSession?.email ?? 'hudozit@gmail.com');
-  const [userName, setUserName] = useState(initialSession?.userName ?? 'VoltGamer');
-  const [roomId, setRoomId] = useState(initialSession?.roomId ?? 'VaporSuite');
-  const [isJoined, setIsJoined] = useState(!!initialSession);
+  // Supabase auth session is the source of identity.
+  const [session, setSession] = useState<Session | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const email = session?.user?.email ?? '';
+
+  // Lobby details
+  const [userName, setUserName] = useState(prefs.userName);
+  const [roomId, setRoomId] = useState(prefs.roomId);
+  const [isJoined, setIsJoined] = useState(false);
 
   // Application Tabs
   const [activeTab, setActiveTab] = useState<'board' | 'stats' | 'cashier' | 'privacy' | 'admin'>('board');
@@ -65,7 +53,7 @@ export default function App() {
 
   const fetchConfig = async (forEmail: string) => {
     try {
-      const res = await fetch(`/api/config?email=${encodeURIComponent(forEmail)}`);
+      const res = await fetch(apiUrl(`/api/config?email=${encodeURIComponent(forEmail)}`));
       const data = await res.json();
       setConfig(data);
     } catch (e) {
@@ -92,8 +80,9 @@ export default function App() {
 
   // Fetch updated user profile from backend REST API
   const fetchProfile = async () => {
+    if (!email) return;
     try {
-      const response = await fetch(`/api/profile?email=${encodeURIComponent(email)}`);
+      const response = await fetch(apiUrl(`/api/profile?email=${encodeURIComponent(email)}`));
       const data = await response.json();
       setProfile(data);
     } catch (e) {
@@ -108,10 +97,9 @@ export default function App() {
     }
 
     setConnectionError('');
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}?email=${encodeURIComponent(email)}&name=${encodeURIComponent(userName)}&roomId=${encodeURIComponent(roomId)}`;
+    const url = wsUrl(`?email=${encodeURIComponent(email)}&name=${encodeURIComponent(userName)}&roomId=${encodeURIComponent(roomId)}`);
 
-    const socket = new WebSocket(wsUrl);
+    const socket = new WebSocket(url);
     socketRef.current = socket;
     (window as any).ludoSocket = socket; // Expose globally for sub-components
 
@@ -169,13 +157,16 @@ export default function App() {
     };
   };
 
-  // Auto-reconnect a restored session on load (skips the login screen).
+  // Track the Supabase auth session (identity source of truth).
   useEffect(() => {
-    if (initialSession) {
-      connectWebSocket();
-    }
-    // Run once on mount; connectWebSocket uses the restored session values.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthReady(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s);
+    });
+    return () => sub.subscription.unsubscribe();
   }, []);
 
   // Close sockets on cleanup
@@ -189,13 +180,15 @@ export default function App() {
 
   // Poll profile + config initially on load and whenever the identity changes
   useEffect(() => {
+    if (!email) return;
     fetchProfile();
     fetchConfig(email);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [email]);
 
   // Prefill the lobby room field with the admin's default room (fresh visitors only).
   useEffect(() => {
-    if (config?.defaultRoomId && !initialSession && !isJoined) {
+    if (config?.defaultRoomId && !isJoined) {
       setRoomId(config.defaultRoomId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -204,16 +197,17 @@ export default function App() {
   const handleJoinRoom = (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !userName || !roomId) return;
-    saveSession({ email, userName, roomId });
+    savePrefs({ userName, roomId });
     setIsJoined(true);
     connectWebSocket();
   };
 
-  const handleSignOut = () => {
-    clearSession();
+  const handleSignOut = async () => {
     if (socketRef.current) socketRef.current.close();
     setIsJoined(false);
     setGameState(null);
+    setProfile(null);
+    await supabase.auth.signOut();
   };
 
   const handleRollDice = () => {
@@ -256,8 +250,14 @@ export default function App() {
   return (
     <div className="min-h-screen bg-dark-bg text-slate-300 font-sans flex flex-col justify-between" id="app_root">
       
-      {/* 1. LOBBY ONBOARDING OR ACTIVE GAMEPORTAL */}
-      {!isJoined ? (
+      {/* 1. AUTH GATE → LOBBY ONBOARDING → ACTIVE GAMEPORTAL */}
+      {!authReady ? (
+        <div className="flex-1 flex items-center justify-center p-4">
+          <Loader2Icon className="w-10 h-10 text-neon-purple animate-spin" />
+        </div>
+      ) : !session ? (
+        <AuthGate />
+      ) : !isJoined ? (
         <div className="flex-1 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-gradient-to-tr from-neon-purple/5 via-dark-bg to-neon-cyan/5 pointer-events-none" />
           
@@ -281,18 +281,21 @@ export default function App() {
               </p>
             </div>
 
-            <form onSubmit={handleJoinRoom} className="space-y-4">
-              <div>
-                <label className="block text-xs font-mono text-slate-400 mb-1.5">Regulated Identity Email</label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg py-2 px-3 font-mono text-xs text-white focus:outline-none focus:border-neon-purple/60"
-                  required
-                />
-              </div>
+            {/* Signed-in identity (from Supabase Auth) */}
+            <div className="mb-4 flex items-center justify-between gap-2 bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2">
+              <span className="text-[11px] font-mono text-slate-300 truncate">
+                <span className="text-slate-500">Signed in:</span> {email}
+              </span>
+              <button
+                type="button"
+                onClick={handleSignOut}
+                className="text-[10px] font-mono text-slate-400 hover:text-neon-pink transition-colors flex-shrink-0 cursor-pointer"
+              >
+                Sign out
+              </button>
+            </div>
 
+            <form onSubmit={handleJoinRoom} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-mono text-slate-400 mb-1.5">Lobby Nickname</label>
@@ -328,7 +331,7 @@ export default function App() {
                 type="submit"
                 className="w-full py-2.5 rounded-lg bg-neon-purple hover:bg-neon-purple/90 text-white font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(157,78,221,0.3)] cursor-pointer"
               >
-                Authenticate & Enter Arena
+                Enter Arena
               </button>
             </form>
 

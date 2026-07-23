@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { UserProfile, Transaction, PublicConfig } from '../types.js';
 import { CreditCard, Wallet, ArrowDownLeft, ArrowUpRight, ShieldCheck, HelpCircle, Lock, Loader2, CheckCircle2, AlertCircle, Copy, Check, Ticket, Gift } from 'lucide-react';
 import { formatNaira, TICKET_PACK_PRICE, TICKET_PACK_SIZE } from '../currency.js';
+import { apiUrl } from '../config.js';
 
 interface FinancePortalProps {
   profile: UserProfile;
@@ -66,7 +67,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
     await new Promise(r => setTimeout(r, 1200)); // simulate payment settlement
 
     try {
-      const response = await fetch(`/api/profile/buy-tickets`, {
+      const response = await fetch(apiUrl(`/api/profile/buy-tickets`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: profile.email }),
@@ -106,7 +107,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
     await new Promise(r => setTimeout(r, 900));
 
     try {
-      const response = await fetch(`/api/profile/deposit`, {
+      const response = await fetch(apiUrl(`/api/profile/deposit`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -163,7 +164,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
     await new Promise(r => setTimeout(r, 2000)); // Simulate anti-fraud risk check
 
     try {
-      const response = await fetch(`/api/profile/withdraw`, {
+      const response = await fetch(apiUrl(`/api/profile/withdraw`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -203,7 +204,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
     await new Promise(r => setTimeout(r, 2000)); // Simulate AI document facial match check
 
     try {
-      const response = await fetch(`/api/profile/verify`, {
+      const response = await fetch(apiUrl(`/api/profile/verify`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

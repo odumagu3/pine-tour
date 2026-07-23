@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { UserProfile } from '../types.js';
 import { ShieldAlert, Download, Trash2, Check, Lock, CheckCircle, FileJson } from 'lucide-react';
+import { apiUrl } from '../config.js';
 
 interface PrivacyPortalProps {
   profile: UserProfile;
@@ -18,7 +19,7 @@ export default function PrivacyPortal({ profile, onResetData }: PrivacyPortalPro
     await new Promise(r => setTimeout(r, 1000)); // Mock preparation delay
 
     try {
-      const response = await fetch(`/api/profile/export`, {
+      const response = await fetch(apiUrl(`/api/profile/export`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: profile.email }),
@@ -44,7 +45,7 @@ export default function PrivacyPortal({ profile, onResetData }: PrivacyPortalPro
   // Erase account data from the server
   const handleErasure = async () => {
     try {
-      const response = await fetch(`/api/profile/reset`, {
+      const response = await fetch(apiUrl(`/api/profile/delete`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: profile.email }),

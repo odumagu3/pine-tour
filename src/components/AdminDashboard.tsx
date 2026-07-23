@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { PublicConfig } from '../types.js';
 import { formatNaira } from '../currency.js';
+import { apiUrl } from '../config.js';
 import { ShieldCheck, Lock, Loader2, CheckCircle2, AlertCircle, Save, Building2, Trophy, Ticket, Gamepad2, Users, Unlock } from 'lucide-react';
 
 interface AdminDashboardProps {
@@ -9,6 +10,36 @@ interface AdminDashboardProps {
   config: PublicConfig | null;
   onSaved: () => void; // ask App to refetch the public config
 }
+
+// Shared field classes (module scope so their identity is stable across renders)
+const field = "w-full bg-slate-900 border border-slate-800 rounded-lg py-2 px-3 font-mono text-xs text-white focus:outline-none focus:border-neon-purple/60";
+const labelCls = "block text-[11px] font-mono text-slate-400 mb-1.5";
+
+// IMPORTANT: These presentational components MUST live at module scope. If they
+// were declared inside AdminDashboard, every render (i.e. every keystroke) would
+// create new component identities, forcing React to unmount/remount the inputs —
+// which loses focus and scrolls the page. Keeping them here fixes that.
+const Section: React.FC<{ icon: React.ReactNode; title: string; children: React.ReactNode }> = ({ icon, title, children }) => (
+  <div className="bg-dark-card border border-slate-800 rounded-2xl p-5 shadow-lg space-y-4">
+    <h3 className="text-sm font-bold font-display text-white flex items-center gap-2">
+      <span className="text-neon-purple">{icon}</span> {title}
+    </h3>
+    {children}
+  </div>
+);
+
+const Toggle: React.FC<{ value: boolean; onChange: (v: boolean) => void; label: string }> = ({ value, onChange, label }) => (
+  <div className="flex items-center justify-between bg-slate-900/50 rounded-lg px-3 py-2 border border-slate-800">
+    <span className="text-[11px] font-mono text-slate-300">{label}</span>
+    <button
+      type="button"
+      onClick={() => onChange(!value)}
+      className={`px-3 py-1 rounded-lg font-mono font-bold text-[10px] transition-all ${value ? 'bg-neon-green text-dark-bg' : 'bg-slate-800 text-slate-400'}`}
+    >
+      {value ? 'ON' : 'OFF'}
+    </button>
+  </div>
+);
 
 // Editable shape (everything except isAdmin). adminPasscode is a "new passcode" field.
 interface EditableConfig {
@@ -64,7 +95,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     setError('');
     setVerifying(true);
     try {
-      const res = await fetch('/api/admin/verify', {
+      const res = await fetch(apiUrl('/api/admin/verify'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, passcode }),
@@ -111,7 +142,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
       ...(form.newPasscode.trim() ? { adminPasscode: form.newPasscode.trim() } : {}),
     };
     try {
-      const res = await fetch('/api/admin/config', {
+      const res = await fetch(apiUrl('/api/admin/config'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, passcode: form.newPasscode.trim() || passcode, config: payload }),
@@ -201,31 +232,6 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
   }
 
   // Unlocked settings editor
-  const Section: React.FC<{ icon: React.ReactNode; title: string; children: React.ReactNode }> = ({ icon, title, children }) => (
-    <div className="bg-dark-card border border-slate-800 rounded-2xl p-5 shadow-lg space-y-4">
-      <h3 className="text-sm font-bold font-display text-white flex items-center gap-2">
-        <span className="text-neon-purple">{icon}</span> {title}
-      </h3>
-      {children}
-    </div>
-  );
-
-  const field = "w-full bg-slate-900 border border-slate-800 rounded-lg py-2 px-3 font-mono text-xs text-white focus:outline-none focus:border-neon-purple/60";
-  const labelCls = "block text-[11px] font-mono text-slate-400 mb-1.5";
-
-  const Toggle: React.FC<{ value: boolean; onChange: (v: boolean) => void; label: string }> = ({ value, onChange, label }) => (
-    <div className="flex items-center justify-between bg-slate-900/50 rounded-lg px-3 py-2 border border-slate-800">
-      <span className="text-[11px] font-mono text-slate-300">{label}</span>
-      <button
-        type="button"
-        onClick={() => onChange(!value)}
-        className={`px-3 py-1 rounded-lg font-mono font-bold text-[10px] transition-all ${value ? 'bg-neon-green text-dark-bg' : 'bg-slate-800 text-slate-400'}`}
-      >
-        {value ? 'ON' : 'OFF'}
-      </button>
-    </div>
-  );
-
   return (
     <div className="w-full max-w-3xl mx-auto space-y-5" id="admin_dashboard">
       {/* Header */}

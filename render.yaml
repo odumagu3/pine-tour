@@ -1,8 +1,10 @@
-# Render Blueprint — one-click deploy of the full app (frontend + API + WebSocket).
+# Render Blueprint — hosts the Pine Tour BACKEND only (REST API + WebSocket game
+# engine). The frontend is deployed separately on Vercel.
 # In Render: New → Blueprint → connect this repo → it reads this file.
+# Secrets (sync: false) must be set in the Render dashboard, not committed here.
 services:
   - type: web
-    name: neon-whot-bet
+    name: pine-tour-api
     runtime: node
     plan: free
     # --include=dev is required because the build tools (vite, esbuild, tsx)
@@ -13,3 +15,9 @@ services:
       - key: NODE_ENV
         value: production
       # Render injects PORT automatically; server.ts reads process.env.PORT.
+      - key: SUPABASE_URL
+        sync: false          # e.g. https://dryjsgwprdcpmssxsumk.supabase.co
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false          # secret — set in dashboard, never commit
+      - key: FRONTEND_ORIGIN
+        sync: false          # the Vercel URL, e.g. https://pine-tour.vercel.app
