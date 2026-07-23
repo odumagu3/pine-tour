@@ -4,6 +4,7 @@ import { PublicConfig } from '../types.js';
 import { formatNaira } from '../currency.js';
 import { apiUrl } from '../config.js';
 import { ShieldCheck, Lock, Loader2, CheckCircle2, AlertCircle, Save, Building2, Trophy, Ticket, Gamepad2, Users, Unlock } from 'lucide-react';
+import TournamentPanel from './TournamentPanel.tsx';
 
 interface AdminDashboardProps {
   email: string;
@@ -289,6 +290,9 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
           Set a sponsor name and a prize above 0 to open a tournament. Clear the sponsor name (or set the prize to 0) to close all tournaments.
         </p>
       </Section>
+
+      {/* Live knockout tournament — create, simulate a field, start, and watch */}
+      <TournamentPanel email={email} passcode={passcode} />
 
       {/* Ticket economy */}
       <Section icon={<Ticket className="w-4 h-4" />} title="Ticket Economy">

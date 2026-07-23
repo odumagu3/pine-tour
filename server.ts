@@ -406,25 +406,30 @@ function endWhotGame(roomId: string, winnerId: string) {
   room.potWinnerId = winnerId;
 
   const winner = room.players.find(p => p.id === winnerId);
+  const isTourney = tournamentTableIds.has(roomId);
   const prizeAmount = room.sponsorPrize;
   const sponsor = room.sponsorName || 'Tournament Sponsor';
 
   room.logs.push({
     id: 'log_end_' + Date.now(),
-    message: `🏆 Tournament Finished! ${winner ? winner.name : 'Unknown'} played all cards and won!`,
+    message: `🏆 ${winner ? winner.name : 'Unknown'} played all cards and won the table!`,
     type: 'win',
     timestamp: new Date().toISOString(),
   });
 
   room.logs.push({
     id: 'log_pot_' + Date.now(),
-    message: `💰 ${winner ? winner.name : 'Unknown'} wins the ₦${prizeAmount.toLocaleString('en-NG')} cash prize sponsored by ${sponsor}!`,
+    message: isTourney
+      ? `➡️ ${winner ? winner.name : 'Unknown'} advances to the next round!`
+      : `💰 ${winner ? winner.name : 'Unknown'} wins the ₦${prizeAmount.toLocaleString('en-NG')} cash prize sponsored by ${sponsor}!`,
     type: 'win',
     timestamp: new Date().toISOString(),
   });
 
-  // Credit winner profile with the sponsor's cash prize
-  if (winner && !winner.isBot) {
+  // Casual tables pay the sponsor prize to the winner. Tournament tables do NOT
+  // — only the bracket CHAMPION is paid, and that's handled by the tournament
+  // layer (finishTournament) so the prize is awarded exactly once.
+  if (winner && !winner.isBot && !isTourney) {
     const profile = getProfile(winner.id);
     profile.balance += prizeAmount;
     profile.totalEarnings += prizeAmount;
@@ -452,6 +457,262 @@ function endWhotGame(roomId: string, winnerId: string) {
   });
 
   broadcastRoomState(roomId);
+
+  // Notify the bracket so the winner can advance / the champion be crowned.
+  if (isTourney) onTournamentTableEnd(roomId, winnerId);
+}
+
+// =============================================================================
+// KNOCKOUT TOURNAMENT ORCHESTRATOR
+// A single tournament runs at a time. Entrants (real players and/or simulated
+// AI, for testing) are seeded into tables of 4; each table plays a normal Whot
+// game and the winner advances. Rounds repeat until one CHAMPION remains, who is
+// paid the sponsor prize exactly once. Reuses the existing per-room game engine.
+// =============================================================================
+interface TournamentEntrant { id: string; name: string; isBot: boolean; }
+interface TournamentTable { roomId: string; entrantIds: string[]; winnerId: string | null; status: 'playing' | 'finished'; }
+interface TournamentRound { index: number; tables: TournamentTable[]; byes: string[]; }
+interface Tournament {
+  id: string;
+  status: 'registering' | 'running' | 'finished';
+  sponsorName: string;
+  prize: number;
+  aiEligible: boolean;              // may AI entrants win the prize? (test mode)
+  entrants: TournamentEntrant[];
+  rounds: TournamentRound[];
+  currentRound: number;             // 1-based
+  championId: string | null;
+  createdAt: string;
+}
+
+let tournament: Tournament | null = null;
+const tournamentTableIds = new Set<string>();
+// When a table must be decided by (ms epoch). Guards against deadlocked games,
+// stalls, and disconnects so a single table can never freeze the whole bracket.
+const tableDeadlines = new Map<string, number>();
+const TOURNAMENT_TABLE_MAX_MS = 45000; // 45s hard cap per table game
+
+function shuffle<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+function entrantById(id: string): TournamentEntrant | undefined {
+  return tournament?.entrants.find(e => e.id === id);
+}
+
+// Remove all rooms this tournament created.
+function clearTournamentTables() {
+  tournamentTableIds.forEach(roomId => { delete gameRooms[roomId]; });
+  tournamentTableIds.clear();
+  tableDeadlines.clear();
+}
+
+// Decide a stuck/expired table: fewest cards wins (ties broken by seat order).
+function forceResolveTournamentTable(roomId: string) {
+  const room = gameRooms[roomId];
+  if (!room || room.status !== 'playing') return;
+  let winner = room.players[0];
+  room.players.forEach(p => { if (p.cardsCount < winner.cardsCount) winner = p; });
+  room.logs.push({
+    id: 'log_timecap_' + Date.now(),
+    message: `⏱️ Time cap reached — ${winner.name} advances on fewest cards.`,
+    type: 'system',
+    timestamp: new Date().toISOString(),
+  });
+  endWhotGame(roomId, winner.id); // triggers onTournamentTableEnd → advance
+}
+
+// Seat a set of entrants at a fresh table room and start the game immediately.
+function seatTournamentTable(roomId: string, entrants: TournamentEntrant[]) {
+  const colors: PlayerColor[] = ['red', 'green', 'yellow', 'blue'];
+  const players: Player[] = entrants.map((e, i) => ({
+    id: e.id,
+    name: e.name,
+    color: colors[i] ?? null,
+    isBot: e.isBot,
+    balance: 0,
+    currentBet: 0,
+    ready: true,
+    cardsCount: 0,
+    hand: [],
+    isConnected: true,
+    highestRollInRound: 0,
+    totalRollsCount: 0,
+  }));
+  gameRooms[roomId] = {
+    roomId,
+    status: 'waiting',
+    players,
+    pot: tournament?.prize ?? 0,
+    activePlayerIndex: 0,
+    logs: [],
+    turnTimeLeft: adminConfig.turnTimerSeconds,
+    winnerPlayerId: null,
+    potWinnerId: null,
+    antiCheatLog: [],
+    sponsorName: tournament?.sponsorName ?? '',
+    sponsorPrize: tournament?.prize ?? 0,
+    drawPileCount: 0,
+    discardPile: [],
+    requestedSuit: null,
+    turnDirection: 1,
+  };
+  tournamentTableIds.add(roomId);
+  tableDeadlines.set(roomId, Date.now() + TOURNAMENT_TABLE_MAX_MS);
+  startWhotGameSession(gameRooms[roomId]);
+}
+
+// Partition entrant ids into tables of up to 4. A leftover group of exactly one
+// gets a bye (auto-advance). Groups of 2-3 play a short table (valid in Whot).
+function buildRound(entrantIds: string[], roundIndex: number): TournamentRound {
+  const shuffled = shuffle([...entrantIds]);
+  const tables: TournamentTable[] = [];
+  const byes: string[] = [];
+  chunk(shuffled, 4).forEach((group, i) => {
+    if (group.length === 1) { byes.push(group[0]); return; }
+    const roomId = `__t_r${roundIndex}_${i}`;
+    tables.push({ roomId, entrantIds: group, winnerId: null, status: 'playing' });
+    seatTournamentTable(roomId, group.map(id => entrantById(id)!).filter(Boolean) as TournamentEntrant[]);
+  });
+  return { index: roundIndex, tables, byes };
+}
+
+// Pay the sponsor prize to a human champion (bots have no wallet) and close out.
+function finishTournament(championId: string | null) {
+  if (!tournament) return;
+  tournament.status = 'finished';
+  tournament.championId = championId;
+  const champ = championId ? entrantById(championId) : null;
+  if (champ && !champ.isBot) {
+    const profile = getProfile(champ.id);
+    profile.balance += tournament.prize;
+    profile.totalEarnings += tournament.prize;
+    profile.gamesWon += 1;
+    addTransaction(champ.id, {
+      id: generateHash(),
+      type: 'win',
+      amount: tournament.prize,
+      status: 'completed',
+      timestamp: new Date().toISOString(),
+      method: `${tournament.sponsorName} Tournament — Champion`,
+      txHash: 'hash_champ_' + Math.random().toString(36).substring(2, 9),
+      balanceAfter: profile.balance,
+    });
+    saveProfile(champ.id);
+  }
+  console.log(`🏆 Tournament ${tournament.id} finished. Champion: ${champ?.name ?? 'none'} (${champ?.isBot ? 'AI' : 'human'}).`);
+}
+
+// Take the set of round winners (+ byes) and either crown a champion or seed the
+// next round.
+function advanceTournament(winnerIds: string[]) {
+  if (!tournament) return;
+  const winners = winnerIds.filter(Boolean);
+  if (winners.length <= 1) { finishTournament(winners[0] ?? null); return; }
+  const nextIndex = tournament.currentRound + 1;
+  const round = buildRound(winners, nextIndex);
+  tournament.rounds.push(round);
+  tournament.currentRound = nextIndex;
+  // If everyone got a bye (no tables), keep collapsing until we get a game/champ.
+  if (round.tables.length === 0) advanceTournament(round.byes);
+}
+
+// Called from endWhotGame when a tournament table finishes.
+function onTournamentTableEnd(roomId: string, winnerId: string) {
+  if (!tournament || tournament.status !== 'running') return;
+  const round = tournament.rounds[tournament.currentRound - 1];
+  if (!round) return;
+  const table = round.tables.find(t => t.roomId === roomId);
+  if (!table || table.status === 'finished') return;
+  tableDeadlines.delete(roomId);
+  table.status = 'finished';
+  table.winnerId = winnerId;
+  if (round.tables.every(t => t.status === 'finished')) {
+    advanceTournament([...round.tables.map(t => t.winnerId!), ...round.byes]);
+  }
+}
+
+// --- lifecycle actions (invoked by the admin REST endpoints) ---
+function createTournament(): { ok?: true; error?: string } {
+  const t = currentTournament();
+  if (!t.active) return { error: 'Set a sponsor name and prize (Tournament section) before creating a tournament.' };
+  clearTournamentTables();
+  tournament = {
+    id: 'tny_' + Date.now().toString(36),
+    status: 'registering',
+    sponsorName: t.sponsorName,
+    prize: t.prize,
+    aiEligible: true, // test mode: AI may fill and win. Set false when going live.
+    entrants: [],
+    rounds: [],
+    currentRound: 0,
+    championId: null,
+    createdAt: new Date().toISOString(),
+  };
+  return { ok: true };
+}
+
+function simulateEntrants(count: number): { ok?: true; error?: string } {
+  if (!tournament || tournament.status !== 'registering') return { error: 'No tournament open for registration.' };
+  const n = Math.max(1, Math.min(200, Math.floor(count)));
+  const base = tournament.entrants.length;
+  for (let i = 0; i < n; i++) {
+    const name = OPPONENT_NAMES[(base + i) % OPPONENT_NAMES.length] + '-' + (base + i + 1);
+    tournament.entrants.push({ id: `sim_${base + i}_${Math.random().toString(36).slice(2, 6)}`, name, isBot: true });
+  }
+  return { ok: true };
+}
+
+function startTournamentRun(): { ok?: true; error?: string } {
+  if (!tournament || tournament.status !== 'registering') return { error: 'No tournament open for registration.' };
+  if (tournament.entrants.length < 2) return { error: 'Need at least 2 entrants to start.' };
+  tournament.status = 'running';
+  tournament.currentRound = 1;
+  const round = buildRound(tournament.entrants.map(e => e.id), 1);
+  tournament.rounds = [round];
+  if (round.tables.length === 0) advanceTournament(round.byes);
+  return { ok: true };
+}
+
+function resetTournament() {
+  clearTournamentTables();
+  tournament = null;
+}
+
+// Admin-facing snapshot of the bracket (safe to show bot/human in this view).
+function tournamentStatus() {
+  if (!tournament) return { exists: false };
+  const nameOf = (id: string | null) => (id ? (entrantById(id)?.name ?? '—') : '—');
+  return {
+    exists: true,
+    id: tournament.id,
+    status: tournament.status,
+    sponsorName: tournament.sponsorName,
+    prize: tournament.prize,
+    entrantCount: tournament.entrants.length,
+    currentRound: tournament.currentRound,
+    totalRounds: tournament.rounds.length,
+    championId: tournament.championId,
+    championName: tournament.championId ? nameOf(tournament.championId) : null,
+    championIsBot: tournament.championId ? !!entrantById(tournament.championId)?.isBot : null,
+    rounds: tournament.rounds.map(r => ({
+      index: r.index,
+      byes: r.byes.map(nameOf),
+      tables: r.tables.map(tb => ({
+        players: tb.entrantIds.map(id => ({ name: nameOf(id), isBot: !!entrantById(id)?.isBot })),
+        winner: nameOf(tb.winnerId),
+        done: tb.status === 'finished',
+      })),
+    })),
+  };
 }
 
 // Bot automated Whot action
@@ -974,6 +1235,52 @@ app.post('/api/admin/config', async (req, res) => {
   res.json({ success: true, config: editable });
 });
 
+// -----------------------------------------------------------------------------
+// KNOCKOUT TOURNAMENT — admin control endpoints (email + passcode required).
+// -----------------------------------------------------------------------------
+function requireAdmin(req: any, res: any): boolean {
+  const { email, passcode } = req.body || {};
+  if (!isAdminEmail(email) || passcode !== adminConfig.adminPasscode) {
+    res.status(401).json({ error: 'Invalid admin email or passcode.' });
+    return false;
+  }
+  return true;
+}
+
+app.post('/api/tournament/create', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const r = createTournament();
+  if (r.error) return res.status(400).json({ error: r.error });
+  res.json({ success: true, status: tournamentStatus() });
+});
+
+app.post('/api/tournament/simulate', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const r = simulateEntrants(Number(req.body.count) || 0);
+  if (r.error) return res.status(400).json({ error: r.error });
+  res.json({ success: true, status: tournamentStatus() });
+});
+
+app.post('/api/tournament/start', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const r = startTournamentRun();
+  if (r.error) return res.status(400).json({ error: r.error });
+  res.json({ success: true, status: tournamentStatus() });
+});
+
+app.post('/api/tournament/reset', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  resetTournament();
+  res.json({ success: true, status: tournamentStatus() });
+});
+
+// Read-only bracket snapshot for the admin dashboard poller.
+app.get('/api/tournament/status', (req, res) => {
+  const email = (req.query.email as string) || '';
+  if (!isAdminEmail(email)) return res.status(401).json({ error: 'Admin only.' });
+  res.json(tournamentStatus());
+});
+
 // 3. POST Simulated Withdrawal Portal (For verified users)
 app.post('/api/profile/withdraw', async (req, res) => {
   const { email, amount, method, pin } = req.body;
@@ -1417,6 +1724,15 @@ setInterval(() => {
       }
     }
   });
+
+  // Tournament watchdog: force-resolve any table that ran past its time cap so a
+  // deadlocked/stalled game can never freeze the bracket.
+  if (tableDeadlines.size > 0) {
+    const now = Date.now();
+    for (const [roomId, deadline] of tableDeadlines) {
+      if (now >= deadline) forceResolveTournamentTable(roomId);
+    }
+  }
 }, 1000);
 
 
