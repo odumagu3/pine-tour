@@ -85,6 +85,8 @@ export default function App() {
   const [tourneyInfo, setTourneyInfo] = useState<{ entrantCount?: number; prize?: number; sponsorName?: string; round?: number; bye?: boolean }>({});
   const [tourneyError, setTourneyError] = useState('');
   const [registering, setRegistering] = useState(false);
+  // Mobile: auto-hide the top nav during a live game so it doesn't block the board.
+  const [navHidden, setNavHidden] = useState(false);
   const [bracketPublic, setBracketPublic] = useState<{ exists: boolean; open: boolean; status?: string; sponsorName?: string; prize?: number; entrantCount?: number } | null>(null);
   const wantRegisterRef = useRef(false);
   const tourneyOverlay = tourneyPhase === 'join' || tourneyPhase === 'lobby' || tourneyPhase === 'waiting' || tourneyPhase === 'eliminated' || tourneyPhase === 'champion';
@@ -296,6 +298,28 @@ export default function App() {
     if (config?.roomName) setRoomId(config.roomName);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config?.roomName]);
+
+  // While actually playing a game, reveal the top nav on scroll and slide it away
+  // after a short idle so it doesn't cover the board on small screens. (The nav
+  // stays put on desktop via a Tailwind md: override.)
+  useEffect(() => {
+    const inGame = isJoined && activeTab === 'board' && !!gameState;
+    if (!inGame) { setNavHidden(false); return; }
+    let idle: number | undefined;
+    const reveal = () => {
+      setNavHidden(false);
+      if (idle) window.clearTimeout(idle);
+      idle = window.setTimeout(() => setNavHidden(true), 1500);
+    };
+    idle = window.setTimeout(() => setNavHidden(true), 1800);
+    window.addEventListener('scroll', reveal, { passive: true });
+    window.addEventListener('touchmove', reveal, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', reveal);
+      window.removeEventListener('touchmove', reveal);
+      if (idle) window.clearTimeout(idle);
+    };
+  }, [isJoined, activeTab, gameState]);
 
   const handleJoinRoom = (e: React.FormEvent) => {
     e.preventDefault();
@@ -529,8 +553,8 @@ export default function App() {
             )}
           </AnimatePresence>
 
-          {/* HEADER HEADER */}
-          <header className="bg-dark-card border-b border-slate-800/80 px-3 sm:px-6 py-3 sm:py-4 flex flex-col md:flex-row items-center justify-between gap-3 sm:gap-4 sticky top-0 z-40">
+          {/* HEADER HEADER — auto-hides on mobile during play (see navHidden effect) */}
+          <header className={`bg-dark-card border-b border-slate-800/80 px-3 sm:px-6 py-3 sm:py-4 flex flex-col md:flex-row items-center justify-between gap-3 sm:gap-4 sticky top-0 z-40 transition-transform duration-300 ${navHidden ? '-translate-y-full md:translate-y-0' : 'translate-y-0'}`}>
             <div className="flex items-center gap-3">
               <div className="h-9 w-9 rounded-lg bg-gradient-to-tr from-neon-purple to-neon-cyan flex items-center justify-center font-display font-extrabold text-white shadow-lg shadow-neon-purple/20">
                 NW
