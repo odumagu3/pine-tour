@@ -713,7 +713,13 @@ function simulateEntrants(count: number): { ok?: true; error?: string } {
 
 function startTournamentRun(): { ok?: true; error?: string } {
   if (!tournament || tournament.status !== 'registering') return { error: 'No tournament open for registration.' };
-  if (tournament.entrants.length < 2) return { error: 'Need at least 2 entrants to start.' };
+  // Auto-fill remaining seats with AI so every registered human gets a full
+  // table. The field is topped up to at least TOURNAMENT_FIELD_SIZE and always a
+  // multiple of 4 (e.g. 5 humans → +11 AI → 16 seats).
+  const current = tournament.entrants.length;
+  const desired = Math.max(TOURNAMENT_FIELD_SIZE, Math.ceil(current / 4) * 4);
+  if (desired > current) simulateEntrants(desired - current);
+  if (tournament.entrants.length < 2) return { error: 'Need at least 1 registered player to start.' };
   tournament.status = 'running';
   tournament.currentRound = 1;
   const round = buildRound(tournament.entrants.map(e => e.id), 1);
@@ -771,6 +777,28 @@ const TOURNEY_LOBBY = '__t_lobby'; // registered, waiting for the tournament to 
 const TOURNEY_WAIT = '__t_wait';   // won their table, waiting for the next round
 const TOURNEY_OUT = '__t_out';     // eliminated
 const ROUND_GAP_MS = 5000;         // pause between rounds so winners see they advanced
+const TOURNAMENT_FIELD_SIZE = 16;  // seats a tournament fills to (humans + AI), multiple of 4
+
+// Casual banter the AI opponents drop into the arena chat so tables feel human.
+const BOT_CHAT_LINES = [
+  'Good luck everyone! 🍀', "Let's go 🔥", 'This prize is mine 😎', 'Who else is nervous 😅',
+  'Nice one!', 'Ahh so close', 'Whot! 🃏', 'Shuffle up 🎴', 'May the best player win 🙏',
+  'That was a bold move', 'I felt that one 😩', 'Bring it on!', 'gg wp', 'Anyone from Lagos? 🇳🇬',
+  'My cards are trash today 😂', 'One more win 💪', 'Respect ✊', 'Big money on the line 💰',
+];
+
+// Broadcast a chat message. During a live tournament everyone in the arena sees
+// it (a single shared chat room across all tables); otherwise it's per-room.
+function broadcastArenaChat(messageObj: any, fromRoomId: string) {
+  const payload = JSON.stringify({ type: 'chat-received', message: messageObj });
+  const bracketLive = !!tournament && (tournament.status === 'running' || tournament.status === 'registering');
+  Object.keys(activeConnections).forEach(cid => {
+    const c = activeConnections[cid];
+    if (c.ws.readyState !== WebSocket.OPEN) return;
+    const inArena = typeof c.roomId === 'string' && c.roomId.startsWith('__t');
+    if (bracketLive ? inArena : c.roomId === fromRoomId) c.ws.send(payload);
+  });
+}
 
 // Send a JSON message to every open connection for an email.
 function sendToEmail(email: string, obj: any) {
@@ -1632,6 +1660,24 @@ wss.on('connection', async (ws: WebSocket, req) => {
       return;
     }
 
+    // Arena chat works from anywhere in the tournament (playing / waiting /
+    // lobby), so handle it before the game-room guard.
+    if (msg.type === 'chat-message') {
+      const chatMsg = (msg.message || '').toString();
+      if (!chatMsg.trim()) return;
+      const roomId = activeConnections[connId]?.roomId || '';
+      const seat = gameRooms[roomId]?.players.find(p => p.id === userEmail);
+      const senderName = seat?.name || entrantById(userEmail)?.name || userName;
+      broadcastArenaChat({
+        id: 'chat_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+        senderName,
+        senderColor: seat?.color ?? null,
+        message: chatMsg.substring(0, 150),
+        timestamp: new Date().toISOString(),
+      }, roomId);
+      return;
+    }
+
     // The player's current room (a game table) — dynamic so it follows them
     // across bracket rounds. Pseudo-rooms (lobby/wait/out) have no gameRoom.
     const userRoomId = activeConnections[connId]?.roomId || '';
@@ -1810,29 +1856,6 @@ wss.on('connection', async (ws: WebSocket, req) => {
         break;
       }
 
-      case 'chat-message': {
-        const chatMsg = msg.message;
-        if (!chatMsg) return;
-
-        const chatPayload = JSON.stringify({
-          type: 'chat-received',
-          message: {
-            id: 'chat_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
-            senderName: actionPlayer.name,
-            senderColor: actionPlayer.color,
-            message: chatMsg.substring(0, 150),
-            timestamp: new Date().toISOString(),
-          }
-        });
-
-        Object.keys(activeConnections).forEach(connId => {
-          const conn = activeConnections[connId];
-          if (conn.roomId === userRoomId && conn.ws.readyState === WebSocket.OPEN) {
-            conn.ws.send(chatPayload);
-          }
-        });
-        break;
-      }
     }
   });
 
@@ -1912,6 +1935,24 @@ setInterval(() => {
     }
   }
 }, 1000);
+
+// AI opponents drop occasional banter into the shared arena chat so it feels
+// like a room full of people.
+setInterval(() => {
+  if (!tournament || tournament.status !== 'running') return;
+  const bots = tournament.entrants.filter(e => e.isBot);
+  if (!bots.length || Math.random() > 0.55) return;
+  const bot = bots[Math.floor(Math.random() * bots.length)];
+  const line = BOT_CHAT_LINES[Math.floor(Math.random() * BOT_CHAT_LINES.length)];
+  const colors: PlayerColor[] = ['red', 'green', 'yellow', 'blue'];
+  broadcastArenaChat({
+    id: 'chat_bot_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5),
+    senderName: bot.name,
+    senderColor: colors[Math.floor(Math.random() * colors.length)],
+    message: line,
+    timestamp: new Date().toISOString(),
+  }, '');
+}, 9000);
 
 
 // -----------------------------------------------------------------------------

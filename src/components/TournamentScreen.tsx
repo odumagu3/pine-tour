@@ -1,7 +1,8 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { Hourglass, Crown, Trophy, Swords, Wallet, Users, Loader2, Ticket, Gift, AlertCircle } from 'lucide-react';
+import { Hourglass, Crown, Trophy, Swords, Wallet, Users, Loader2, Ticket, Gift, AlertCircle, MessageSquare, Send } from 'lucide-react';
 import { formatNaira } from '../currency.js';
+import { ChatMessage } from '../types.js';
 
 export type TourneyPhase = 'join' | 'lobby' | 'waiting' | 'eliminated' | 'champion';
 
@@ -24,11 +25,17 @@ interface TournamentScreenProps {
   error?: string;
   registering?: boolean;
   onRegister?: () => void;
+  // shared arena chat
+  chatMessages?: ChatMessage[];
+  chatInput?: string;
+  onChatInput?: (v: string) => void;
+  onSendChat?: (e: React.FormEvent) => void;
+  myName?: string;
 }
 
-export default function TournamentScreen({ phase, info, onGoToCashier, ticketCount = 0, freeGameAvailable = false, canAfford = false, error = '', registering = false, onRegister }: TournamentScreenProps) {
+export default function TournamentScreen({ phase, info, onGoToCashier, ticketCount = 0, freeGameAvailable = false, canAfford = false, error = '', registering = false, onRegister, chatMessages = [], chatInput = '', onChatInput, onSendChat, myName }: TournamentScreenProps) {
   return (
-    <div className="w-full max-w-md mx-auto py-10">
+    <div className="w-full max-w-md mx-auto py-10 space-y-4">
       <motion.div
         initial={{ opacity: 0, scale: 0.97 }}
         animate={{ opacity: 1, scale: 1 }}
@@ -166,6 +173,60 @@ export default function TournamentScreen({ phase, info, onGoToCashier, ticketCou
           </>
         )}
       </motion.div>
+
+      {/* Shared arena chat — visible to every player in the tournament */}
+      {onSendChat && (
+        <ArenaChat messages={chatMessages} input={chatInput} onInput={onChatInput} onSend={onSendChat} myName={myName} />
+      )}
+    </div>
+  );
+}
+
+function ArenaChat({ messages, input, onInput, onSend, myName }: {
+  messages: ChatMessage[];
+  input: string;
+  onInput?: (v: string) => void;
+  onSend: (e: React.FormEvent) => void;
+  myName?: string;
+}) {
+  const bottomRef = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => { bottomRef.current?.scrollIntoView({ block: 'end' }); }, [messages]);
+  return (
+    <div className="bg-dark-card border border-slate-800 rounded-2xl p-4 flex flex-col h-64">
+      <h3 className="text-xs uppercase font-mono tracking-wider text-slate-400 mb-3 flex items-center gap-2">
+        <MessageSquare className="w-4 h-4 text-neon-purple" /> Arena Chat
+        <span className="text-[9px] text-slate-600 normal-case">· everyone in the tournament</span>
+      </h3>
+      <div className="flex-1 overflow-y-auto space-y-1.5 mb-3 pr-1">
+        {messages.length === 0 ? (
+          <div className="text-center py-8 font-mono text-[11px] text-slate-600">Say hi to the arena 👋</div>
+        ) : (
+          messages.map((cm) => (
+            <div key={cm.id} className="text-[11px] font-mono leading-snug">
+              <span className={`font-bold ${
+                cm.senderName === myName ? 'text-neon-purple' :
+                cm.senderColor === 'red' ? 'text-neon-pink' : cm.senderColor === 'green' ? 'text-neon-green' :
+                cm.senderColor === 'yellow' ? 'text-amber-400' : 'text-neon-cyan'
+              }`}>{cm.senderName}:</span>
+              <span className="text-slate-300 ml-1.5">{cm.message}</span>
+            </div>
+          ))
+        )}
+        <div ref={bottomRef} />
+      </div>
+      <form onSubmit={onSend} className="flex gap-2">
+        <input
+          type="text"
+          placeholder="Message the arena…"
+          maxLength={100}
+          value={input}
+          onChange={(e) => onInput?.(e.target.value)}
+          className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-neon-purple/60"
+        />
+        <button type="submit" className="p-2 rounded-lg bg-neon-purple hover:bg-neon-purple/95 text-white transition-all cursor-pointer">
+          <Send className="w-3.5 h-3.5" />
+        </button>
+      </form>
     </div>
   );
 }

@@ -649,6 +649,11 @@ export default function App() {
                       error={tourneyError}
                       registering={registering}
                       onRegister={sendTournamentRegister}
+                      chatMessages={chatMessages}
+                      chatInput={currentChatMessage}
+                      onChatInput={setCurrentChatMessage}
+                      onSendChat={handleSendChat}
+                      myName={userName}
                     />
                   ) : gameState ? (
                   <div className="space-y-6">
