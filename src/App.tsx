@@ -81,11 +81,25 @@ export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
 
   // Knockout tournament participation
-  const [tourneyPhase, setTourneyPhase] = useState<'none' | 'lobby' | 'waiting' | 'playing' | 'eliminated' | 'champion'>('none');
+  const [tourneyPhase, setTourneyPhase] = useState<'none' | 'join' | 'lobby' | 'waiting' | 'playing' | 'eliminated' | 'champion'>('none');
   const [tourneyInfo, setTourneyInfo] = useState<{ entrantCount?: number; prize?: number; sponsorName?: string; round?: number; bye?: boolean }>({});
+  const [tourneyError, setTourneyError] = useState('');
+  const [registering, setRegistering] = useState(false);
   const [bracketPublic, setBracketPublic] = useState<{ exists: boolean; open: boolean; status?: string; sponsorName?: string; prize?: number; entrantCount?: number } | null>(null);
   const wantRegisterRef = useRef(false);
-  const tourneyOverlay = tourneyPhase === 'lobby' || tourneyPhase === 'waiting' || tourneyPhase === 'eliminated' || tourneyPhase === 'champion';
+  const tourneyOverlay = tourneyPhase === 'join' || tourneyPhase === 'lobby' || tourneyPhase === 'waiting' || tourneyPhase === 'eliminated' || tourneyPhase === 'champion';
+
+  // Send the register message over the live socket (used from the Join panel).
+  const sendTournamentRegister = () => {
+    setTourneyError('');
+    setRegistering(true);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'tournament-register' }));
+    } else {
+      wantRegisterRef.current = true;
+      connectWebSocket();
+    }
+  };
 
   const fetchBracketPublic = async () => {
     try {
@@ -148,9 +162,17 @@ export default function App() {
         case 'tournament-lobby':
           setBracketPublic(data);
           setTourneyInfo((p) => ({ ...p, entrantCount: data.entrantCount, prize: data.prize, sponsorName: data.sponsorName }));
-          if (data.registered) setTourneyPhase('lobby');
+          if (data.registered) {
+            setRegistering(false);
+            setTourneyError('');
+            setTourneyPhase('lobby');
+          } else {
+            // Connected but not registered yet → show the Join panel.
+            setTourneyPhase((prev) => (prev === 'none' || prev === 'join' ? 'join' : prev));
+          }
           break;
         case 'tournament-seated':
+          setRegistering(false);
           setTourneyPhase('playing');
           setTourneyInfo((p) => ({ ...p, round: data.round }));
           break;
@@ -187,17 +209,29 @@ export default function App() {
             setGameplayNotice((prev) => (prev === data.message ? null : prev));
           }, 4000);
           break;
-        case 'error':
-          if (!gameState || data.message.includes('full') || data.message.includes('handshake')) {
-            setConnectionError(data.message);
+        case 'error': {
+          const m = data.message || '';
+          // Registration failures keep the player in-app on the Join panel so
+          // they can buy tickets, instead of bouncing them back to the lobby.
+          if (/registration|to register/i.test(m)) {
+            setTourneyError(m);
+            setRegistering(false);
+            setTourneyPhase('join');
+            setIsJoined(true);
+            fetchProfile();
+            break;
+          }
+          if (!gameState || m.includes('full') || m.includes('handshake')) {
+            setConnectionError(m);
             setIsJoined(false);
           } else {
-            setGameplayNotice(data.message);
+            setGameplayNotice(m);
             setTimeout(() => {
-              setGameplayNotice((prev) => (prev === data.message ? null : prev));
+              setGameplayNotice((prev) => (prev === m ? null : prev));
             }, 4000);
           }
           break;
+        }
       }
     };
 
@@ -273,7 +307,9 @@ export default function App() {
     if (bracketOpen && !isAdmin) {
       savePrefs({ userName, roomId: config?.roomName || roomId });
       wantRegisterRef.current = true;
-      setTourneyPhase('lobby');
+      setTourneyError('');
+      setRegistering(true);
+      setTourneyPhase('join');
       setIsJoined(true);
       connectWebSocket();
       return;
@@ -604,9 +640,15 @@ export default function App() {
                 {activeTab === 'board' && (
                   tourneyOverlay ? (
                     <TournamentScreen
-                      phase={tourneyPhase as 'lobby' | 'waiting' | 'eliminated' | 'champion'}
+                      phase={tourneyPhase as 'join' | 'lobby' | 'waiting' | 'eliminated' | 'champion'}
                       info={tourneyInfo}
                       onGoToCashier={() => setActiveTab('cashier')}
+                      ticketCount={profile?.tickets ?? 0}
+                      freeGameAvailable={!!config?.freeGameEnabled && !!profile && !profile.freeGameUsed}
+                      canAfford={(profile?.tickets ?? 0) > 0 || (!!config?.freeGameEnabled && !!profile && !profile.freeGameUsed)}
+                      error={tourneyError}
+                      registering={registering}
+                      onRegister={sendTournamentRegister}
                     />
                   ) : gameState ? (
                   <div className="space-y-6">

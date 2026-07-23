@@ -1,9 +1,9 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { Hourglass, Crown, Trophy, Swords, Wallet, Users, Loader2 } from 'lucide-react';
+import { Hourglass, Crown, Trophy, Swords, Wallet, Users, Loader2, Ticket, Gift, AlertCircle } from 'lucide-react';
 import { formatNaira } from '../currency.js';
 
-export type TourneyPhase = 'lobby' | 'waiting' | 'eliminated' | 'champion';
+export type TourneyPhase = 'join' | 'lobby' | 'waiting' | 'eliminated' | 'champion';
 
 interface TournamentInfo {
   entrantCount?: number;
@@ -17,9 +17,16 @@ interface TournamentScreenProps {
   phase: TourneyPhase;
   info: TournamentInfo;
   onGoToCashier: () => void;
+  // 'join' phase extras
+  ticketCount?: number;
+  freeGameAvailable?: boolean;
+  canAfford?: boolean;
+  error?: string;
+  registering?: boolean;
+  onRegister?: () => void;
 }
 
-export default function TournamentScreen({ phase, info, onGoToCashier }: TournamentScreenProps) {
+export default function TournamentScreen({ phase, info, onGoToCashier, ticketCount = 0, freeGameAvailable = false, canAfford = false, error = '', registering = false, onRegister }: TournamentScreenProps) {
   return (
     <div className="w-full max-w-md mx-auto py-10">
       <motion.div
@@ -28,6 +35,58 @@ export default function TournamentScreen({ phase, info, onGoToCashier }: Tournam
         className="bg-dark-card border border-slate-800 rounded-2xl p-8 text-center shadow-2xl relative overflow-hidden"
       >
         <div className="absolute -top-12 -right-12 w-32 h-32 bg-neon-purple/10 rounded-full blur-3xl" />
+
+        {phase === 'join' && (
+          <>
+            <Ticket className="w-14 h-14 text-neon-purple mx-auto mb-4" />
+            <h2 className="text-xl font-black font-display text-white">Join the Tournament</h2>
+            <p className="text-xs text-slate-400 font-mono mt-2 leading-relaxed">
+              Entry buy-in is <span className="text-white">1 ticket</span>
+              {freeGameAvailable ? ' — or use your free game.' : '.'} Winner takes the cash prize.
+            </p>
+            <div className="mt-5 grid grid-cols-2 gap-3">
+              <Tile icon={<Trophy className="w-4 h-4" />} label="Cash Prize" value={formatNaira(info.prize ?? 0)} accent />
+              <Tile icon={<Ticket className="w-4 h-4" />} label="Your Tickets" value={String(ticketCount)} />
+            </div>
+
+            {freeGameAvailable && (
+              <div className="mt-3 inline-flex items-center gap-1.5 text-[10px] font-mono bg-neon-green/10 border border-neon-green/40 text-neon-green px-2.5 py-1 rounded">
+                <Gift className="w-3 h-3" /> You have 1 free game available
+              </div>
+            )}
+
+            {error && (
+              <div className="mt-4 p-3 bg-red-950/40 border border-red-500/30 rounded-lg text-[11px] text-red-400 font-mono flex items-center gap-2 text-left">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" /> {error}
+              </div>
+            )}
+
+            <div className="mt-5 space-y-2">
+              {canAfford ? (
+                <button
+                  onClick={onRegister}
+                  disabled={registering}
+                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-neon-purple hover:bg-neon-purple/90 text-white font-mono font-bold text-xs cursor-pointer disabled:opacity-60"
+                >
+                  {registering ? <><Loader2 className="w-4 h-4 animate-spin" /> Registering…</> : <><Swords className="w-4 h-4" /> Register Now</>}
+                </button>
+              ) : (
+                <button
+                  onClick={onGoToCashier}
+                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-dark-bg font-mono font-bold text-xs cursor-pointer"
+                >
+                  <Wallet className="w-4 h-4" /> Buy Tickets to Register
+                </button>
+              )}
+              <button
+                onClick={onGoToCashier}
+                className="w-full text-[11px] font-mono text-slate-400 hover:text-white cursor-pointer py-1"
+              >
+                {canAfford ? 'Buy more tickets' : 'Go to the Cashier'}
+              </button>
+            </div>
+          </>
+        )}
 
         {phase === 'lobby' && (
           <>
