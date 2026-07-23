@@ -1573,6 +1573,10 @@ wss.on('connection', async (ws: WebSocket, req) => {
   const userEmail = (urlParams.get('email') || 'hudozit@gmail.com').toLowerCase().trim();
   const userName = urlParams.get('name') || 'VoltGamer';
   const connId = `${userEmail}_${Date.now()}`;
+  // Keepalive: browsers auto-reply to ping with pong; we mark the socket alive so
+  // the heartbeat below can drop truly dead connections.
+  (ws as any).isAlive = true;
+  ws.on('pong', () => { (ws as any).isAlive = true; });
   const profile = await ensureProfile(userEmail);
   const bracketLive = !!tournament && (tournament.status === 'registering' || tournament.status === 'running');
 
@@ -1951,6 +1955,16 @@ setInterval(() => {
     }
   }
 }, 1000);
+
+// WebSocket keepalive: ping every 25s so idle connections aren't dropped by the
+// hosting proxy mid-game, and terminate any that stop responding (dead sockets).
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if ((ws as any).isAlive === false) { ws.terminate(); return; }
+    (ws as any).isAlive = false;
+    try { ws.ping(); } catch { /* socket already closing */ }
+  });
+}, 25000);
 
 // AI opponents drop occasional banter into the shared arena chat so it feels
 // like a room full of people.

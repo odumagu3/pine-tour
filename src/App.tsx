@@ -79,6 +79,8 @@ export default function App() {
   const [connectionError, setConnectionError] = useState('');
   const [gameplayNotice, setGameplayNotice] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const shouldReconnectRef = useRef(false);       // reconnect on unexpected drops
+  const reconnectTimerRef = useRef<number | undefined>(undefined);
 
   // Knockout tournament participation
   const [tourneyPhase, setTourneyPhase] = useState<'none' | 'join' | 'lobby' | 'waiting' | 'playing' | 'eliminated' | 'champion'>('none');
@@ -124,9 +126,12 @@ export default function App() {
 
   // Connect WebSocket relative to window host
   const connectWebSocket = () => {
+    if (reconnectTimerRef.current) { window.clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = undefined; }
     if (socketRef.current) {
       socketRef.current.close();
     }
+    // We now want to stay connected; any unexpected drop should auto-reconnect.
+    shouldReconnectRef.current = true;
 
     setConnectionError('');
     const url = wsUrl(`?email=${encodeURIComponent(email)}&name=${encodeURIComponent(userName)}&roomId=${encodeURIComponent(roomId)}`);
@@ -137,6 +142,7 @@ export default function App() {
 
     socket.onopen = () => {
       setConnected(true);
+      setGameplayNotice((prev) => (prev === 'Connection lost — reconnecting…' ? null : prev));
       fetchProfile();
       // If the user chose to register for the bracket, do it once connected.
       if (wantRegisterRef.current) {
@@ -195,6 +201,8 @@ export default function App() {
           fetchProfile();
           break;
         case 'tournament-cancelled':
+          shouldReconnectRef.current = false;
+          if (socketRef.current) socketRef.current.close();
           setGameState(null);
           setTourneyPhase('none');
           setIsJoined(false);
@@ -224,6 +232,7 @@ export default function App() {
             break;
           }
           if (!gameState || m.includes('full') || m.includes('handshake')) {
+            shouldReconnectRef.current = false;
             setConnectionError(m);
             setIsJoined(false);
           } else {
@@ -239,10 +248,23 @@ export default function App() {
 
     socket.onclose = () => {
       setConnected(false);
+      // Auto-reconnect after an unexpected drop (proxy idle timeout, network
+      // blip) so gameplay/chat recover on their own. The server re-seats the
+      // player on reconnect. Deliberate exits clear shouldReconnectRef first.
+      if (shouldReconnectRef.current) {
+        setGameplayNotice('Connection lost — reconnecting…');
+        reconnectTimerRef.current = window.setTimeout(() => {
+          if (shouldReconnectRef.current) connectWebSocket();
+        }, 1500);
+      }
     };
 
     socket.onerror = () => {
-      setConnectionError('WebSocket connection handshake failed. The game server may be offline.');
+      // Let onclose handle recovery; only surface a hard error if we're not
+      // going to retry.
+      if (!shouldReconnectRef.current) {
+        setConnectionError('WebSocket connection handshake failed. The game server may be offline.');
+      }
     };
   };
 
@@ -261,6 +283,8 @@ export default function App() {
   // Close sockets on cleanup
   useEffect(() => {
     return () => {
+      shouldReconnectRef.current = false;
+      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
       if (socketRef.current) {
         socketRef.current.close();
       }
@@ -353,6 +377,7 @@ export default function App() {
   };
 
   const handleSignOut = async () => {
+    shouldReconnectRef.current = false;
     if (socketRef.current) socketRef.current.close();
     setIsJoined(false);
     setGameState(null);
