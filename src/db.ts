@@ -33,7 +33,7 @@ export interface AdminConfig {
   prizeMin: number;
   prizeMax: number;
   ticketPackPrice: number;
-  ticketPackSize: number;
+  tournamentFieldSize: number; // stored in the legacy ticket_pack_size column
   freeGameEnabled: boolean;
   turnTimerSeconds: number;
   maxPlayers: number;
@@ -53,7 +53,7 @@ function rowToAdminConfig(r: any): AdminConfig {
     prizeMin: Number(r.prize_min),
     prizeMax: Number(r.prize_max),
     ticketPackPrice: Number(r.ticket_pack_price),
-    ticketPackSize: Number(r.ticket_pack_size),
+    tournamentFieldSize: Number(r.ticket_pack_size) || 16,
     freeGameEnabled: !!r.free_game_enabled,
     turnTimerSeconds: Number(r.turn_timer_seconds),
     maxPlayers: Number(r.max_players),
@@ -82,7 +82,7 @@ export async function saveAdminConfig(c: AdminConfig): Promise<void> {
     prize_min: c.prizeMin,
     prize_max: c.prizeMax,
     ticket_pack_price: c.ticketPackPrice,
-    ticket_pack_size: c.ticketPackSize,
+    ticket_pack_size: c.tournamentFieldSize,
     free_game_enabled: c.freeGameEnabled,
     turn_timer_seconds: c.turnTimerSeconds,
     max_players: c.maxPlayers,

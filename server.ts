@@ -103,6 +103,11 @@ function addTransaction(email: string, tx: Transaction): void {
 // -----------------------------------------------------------------------------
 const MIN_TICKETS = 4;   // fewest tickets a player may buy at once
 const MAX_TICKETS = 64;  // most tickets a player may buy at once
+// Tournament field size (seats a bracket fills to with AI). Admin-configurable;
+// clamped to [MIN, MAX] and used rounded to a multiple of 4 (full tables).
+const DEFAULT_FIELD_SIZE = 16;
+const MIN_FIELD_SIZE = 4;
+const MAX_FIELD_SIZE = 128;
 
 const adminConfig: AdminConfig = {
   arenaName: 'Neon Whot! Bet',
@@ -114,7 +119,7 @@ const adminConfig: AdminConfig = {
   prizeMin: 0,
   prizeMax: 0,
   ticketPackPrice: 300, // ₦ per ticket
-  ticketPackSize: 1,
+  tournamentFieldSize: DEFAULT_FIELD_SIZE,
   freeGameEnabled: true,
   turnTimerSeconds: 20,
   maxPlayers: 4,
@@ -714,10 +719,10 @@ function simulateEntrants(count: number): { ok?: true; error?: string } {
 function startTournamentRun(): { ok?: true; error?: string } {
   if (!tournament || tournament.status !== 'registering') return { error: 'No tournament open for registration.' };
   // Auto-fill remaining seats with AI so every registered human gets a full
-  // table. The field is topped up to at least TOURNAMENT_FIELD_SIZE and always a
+  // table. The field is topped up to at least the admin-set size and always a
   // multiple of 4 (e.g. 5 humans → +11 AI → 16 seats).
   const current = tournament.entrants.length;
-  const desired = Math.max(TOURNAMENT_FIELD_SIZE, Math.ceil(current / 4) * 4);
+  const desired = Math.max(tournamentTargetSize(), Math.ceil(current / 4) * 4);
   if (desired > current) simulateEntrants(desired - current);
   if (tournament.entrants.length < 2) return { error: 'Need at least 1 registered player to start.' };
   tournament.status = 'running';
@@ -777,7 +782,13 @@ const TOURNEY_LOBBY = '__t_lobby'; // registered, waiting for the tournament to 
 const TOURNEY_WAIT = '__t_wait';   // won their table, waiting for the next round
 const TOURNEY_OUT = '__t_out';     // eliminated
 const ROUND_GAP_MS = 5000;         // pause between rounds so winners see they advanced
-const TOURNAMENT_FIELD_SIZE = 16;  // seats a tournament fills to (humans + AI), multiple of 4
+
+// The admin-configured field size, clamped and rounded to a multiple of 4.
+function tournamentTargetSize(): number {
+  const raw = adminConfig.tournamentFieldSize || DEFAULT_FIELD_SIZE;
+  const clamped = Math.max(MIN_FIELD_SIZE, Math.min(MAX_FIELD_SIZE, raw));
+  return Math.max(4, Math.round(clamped / 4) * 4);
+}
 
 // Casual banter the AI opponents drop into the arena chat so tables feel human.
 const BOT_CHAT_LINES = [
@@ -1346,6 +1357,11 @@ app.post('/api/admin/config', async (req, res) => {
   // Ticket economy: `ticketPrice` is the price per ticket.
   adminConfig.ticketPackPrice = num(config.ticketPrice ?? config.ticketPackPrice, adminConfig.ticketPackPrice, 0, 100000000);
   if (typeof config.freeGameEnabled === 'boolean') adminConfig.freeGameEnabled = config.freeGameEnabled;
+
+  // Tournament field size (seats the bracket auto-fills to). Stored rounded to a
+  // multiple of 4 so tables are always full.
+  const fieldRaw = num(config.tournamentFieldSize, adminConfig.tournamentFieldSize, MIN_FIELD_SIZE, MAX_FIELD_SIZE);
+  adminConfig.tournamentFieldSize = Math.max(4, Math.round(fieldRaw / 4) * 4);
   // Gameplay
   adminConfig.turnTimerSeconds = num(config.turnTimerSeconds, adminConfig.turnTimerSeconds, 5, 120);
   adminConfig.maxPlayers = num(config.maxPlayers, adminConfig.maxPlayers, 2, 4);

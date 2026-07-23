@@ -48,6 +48,7 @@ interface EditableConfig {
   roomName: string;      // the single arena room name
   sponsorName: string;   // tournament sponsor ('' = no tournament)
   sponsorPrize: number;  // tournament cash prize
+  fieldSize: number;     // seats the bracket auto-fills to (multiple of 4)
   ticketPrice: number;   // price per ticket
   freeGameEnabled: boolean;
   turnTimerSeconds: number;
@@ -74,6 +75,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     roomName: c.roomName ?? c.defaultRoomId ?? '',
     sponsorName: c.sponsorName ?? c.fixedSponsorName ?? '',
     sponsorPrize: Number(c.sponsorPrize ?? c.fixedPrize ?? 0),
+    fieldSize: Number(c.tournamentFieldSize ?? 16),
     ticketPrice: Number(c.ticketPrice ?? c.ticketPackPrice ?? 0),
     freeGameEnabled: !!c.freeGameEnabled,
     turnTimerSeconds: Number(c.turnTimerSeconds ?? 20),
@@ -121,6 +123,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
       roomName: form.roomName,
       sponsorName: form.sponsorName.trim(),
       sponsorPrize: form.sponsorPrize,
+      tournamentFieldSize: form.fieldSize,
       ticketPrice: form.ticketPrice,
       freeGameEnabled: form.freeGameEnabled,
       turnTimerSeconds: form.turnTimerSeconds,
@@ -284,6 +287,18 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
           <div>
             <label className={labelCls}>Cash Prize (₦) — {formatNaira(form.sponsorPrize)}</label>
             <input type="number" className={field} value={form.sponsorPrize} onChange={(e) => update('sponsorPrize', Number(e.target.value))} min={0} />
+          </div>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className={labelCls}>Field Size (seats)</label>
+            <input type="number" className={field} value={form.fieldSize} onChange={(e) => update('fieldSize', Number(e.target.value))} min={4} max={128} step={4} />
+            <p className="text-[10px] text-slate-500 font-mono mt-1">
+              AI fills empty seats up to this. Rounded to a multiple of 4 (full tables). Quick picks:
+              {[8, 16, 32, 64].map(n => (
+                <button key={n} type="button" onClick={() => update('fieldSize', n)} className="ml-1 px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300">{n}</button>
+              ))}
+            </p>
           </div>
         </div>
         <p className="text-[10px] text-slate-500 font-mono">
