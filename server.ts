@@ -218,39 +218,12 @@ function drawCardsFromMarket(room: GameState, count: number): WhotCard[] {
   const drawn: WhotCard[] = [];
 
   for (let i = 0; i < count; i++) {
-    if (drawPile.length === 0) {
-      // Refill the market by recycling the discard pile (keep the top card in
-      // play). A Whot deck is only 54 cards total — we NEVER mint new ones, so
-      // hands can't grow without bound.
-      if (room.discardPile.length > 1) {
-        const topCard = room.discardPile.pop()!;
-        const recycled = [...room.discardPile];
-        room.discardPile = [topCard];
-
-        // Shuffle recycled
-        for (let k = recycled.length - 1; k > 0; k--) {
-          const j = Math.floor(Math.random() * (k + 1));
-          [recycled[k], recycled[j]] = [recycled[j], recycled[k]];
-        }
-
-        drawPile.push(...recycled);
-        room.logs.push({
-          id: 'log_recycle_' + Date.now(),
-          message: `🔄 Discard pile was recycled and shuffled back into the Market draw pile!`,
-          type: 'info',
-          timestamp: new Date().toISOString(),
-        });
-      } else {
-        // Nothing left to draw anywhere — the whole 54-card deck is in players'
-        // hands. Stop here (the player draws fewer/no cards) rather than minting
-        // a new deck, which previously caused unlimited cards.
-        break;
-      }
-    }
-
-    if (drawPile.length > 0) {
-      drawn.push(drawPile.shift()!);
-    }
+    // The draw pile is a FINITE 54-card deck — no recycling of the discard.
+    // When it empties, the market has "finished": the caller then runs the
+    // elimination round (highest card total is knocked out). This keeps hands
+    // bounded and makes the draw pile actually run out as intended.
+    if (drawPile.length === 0) break;
+    drawn.push(drawPile.shift()!);
   }
 
   room.drawPileCount = drawPile.length;
@@ -736,6 +709,12 @@ function finishTournament(championId: string | null) {
     setConnRoomForEmail(champ.id, TOURNEY_OUT);
     sendToEmail(champ.id, { type: 'tournament-champion', prize: tournament.prize, sponsorName: tournament.sponsorName });
   }
+  // Tell every other connected human the tournament is over (so spectators —
+  // eliminated players watching — see who won and can stop watching).
+  const championName = champ?.name ?? null;
+  tournament.entrants.forEach(e => {
+    if (!e.isBot && e.id !== championId) sendToEmail(e.id, { type: 'tournament-over', championName });
+  });
   console.log(`🏆 Tournament ${tournament.id} finished. Champion: ${champ?.name ?? 'none'} (${champ?.isBot ? 'AI' : 'human'}).`);
 }
 
@@ -1600,12 +1579,35 @@ app.get('/api/tournament/status', (req, res) => {
   res.json(tournamentStatus());
 });
 
-// Live spectator snapshot of a single tournament table (admin-only). Hands are
-// omitted — only public game state (counts, top card, turn, recent log).
+// Player-safe bracket for eliminated spectators (names only — no bot flags/ids).
+app.get('/api/tournament/spectate', (_req, res) => {
+  if (!tournament) return res.json({ exists: false });
+  const nameOf = (id: string | null) => (id ? (entrantById(id)?.name ?? '—') : '—');
+  res.json({
+    exists: true,
+    status: tournament.status,
+    currentRound: tournament.currentRound,
+    totalRounds: tournament.rounds.length,
+    championName: tournament.championId ? nameOf(tournament.championId) : null,
+    forcedWinnerName: tournament.forcedWinnerId ? nameOf(tournament.forcedWinnerId) : null,
+    rounds: tournament.rounds.map(r => ({
+      index: r.index,
+      byes: r.byes.map(nameOf),
+      tables: r.tables.map(tb => ({
+        roomId: tb.roomId,
+        players: tb.entrantIds.map(nameOf),
+        winner: nameOf(tb.winnerId),
+        done: tb.status === 'finished',
+      })),
+    })),
+  });
+});
+
+// Live snapshot of a single tournament table. Hands are omitted — only public
+// game state (counts, top card, turn, recent log) — so it's safe for eliminated
+// players to spectate too, not just admins.
 app.get('/api/tournament/table', (req, res) => {
-  const email = (req.query.email as string) || '';
   const roomId = (req.query.roomId as string) || '';
-  if (!isAdminEmail(email)) return res.status(401).json({ error: 'Admin only.' });
   if (!tournamentTableIds.has(roomId) || !gameRooms[roomId]) return res.json({ exists: false });
   const room = gameRooms[roomId];
   const top = room.discardPile[room.discardPile.length - 1] || null;

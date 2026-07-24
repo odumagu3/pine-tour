@@ -8,6 +8,7 @@ import DashboardStats from './components/DashboardStats.tsx';
 import PrivacyPortal from './components/PrivacyPortal.tsx';
 import AdminDashboard from './components/AdminDashboard.tsx';
 import TournamentScreen from './components/TournamentScreen.tsx';
+import TournamentSpectator from './components/TournamentSpectator.tsx';
 import AuthGate from './components/AuthGate.tsx';
 import InstallButton from './components/InstallButton.tsx';
 import { InAppNotifications } from './components/InAppNotifications.tsx';
@@ -89,6 +90,8 @@ export default function App() {
   const [registering, setRegistering] = useState(false);
   // Mobile: auto-hide the top nav during a live game so it doesn't block the board.
   const [navHidden, setNavHidden] = useState(false);
+  // Eliminated players can opt to spectate the rest of the tournament.
+  const [spectating, setSpectating] = useState(false);
   const [bracketPublic, setBracketPublic] = useState<{ exists: boolean; open: boolean; status?: string; sponsorName?: string; prize?: number; entrantCount?: number } | null>(null);
   const wantRegisterRef = useRef(false);
   const tourneyOverlay = tourneyPhase === 'join' || tourneyPhase === 'lobby' || tourneyPhase === 'waiting' || tourneyPhase === 'eliminated' || tourneyPhase === 'champion';
@@ -181,6 +184,7 @@ export default function App() {
           break;
         case 'tournament-seated':
           setRegistering(false);
+          setSpectating(false);
           setTourneyPhase('playing');
           setTourneyInfo((p) => ({ ...p, round: data.round }));
           break;
@@ -200,10 +204,16 @@ export default function App() {
           setTourneyPhase('champion');
           fetchProfile();
           break;
+        case 'tournament-over':
+          fetchProfile();
+          setGameplayNotice(data.championName ? `🏆 Tournament over — ${data.championName} won!` : 'Tournament over.');
+          setTimeout(() => setGameplayNotice((prev) => (prev && prev.includes('Tournament over') ? null : prev)), 6000);
+          break;
         case 'tournament-cancelled':
           shouldReconnectRef.current = false;
           if (socketRef.current) socketRef.current.close();
           setGameState(null);
+          setSpectating(false);
           setTourneyPhase('none');
           setIsJoined(false);
           break;
@@ -386,6 +396,7 @@ export default function App() {
     setGameState(null);
     setProfile(null);
     setTourneyPhase('none');
+    setSpectating(false);
     await supabase.auth.signOut();
   };
 
@@ -690,11 +701,14 @@ export default function App() {
 
                 {/* 1. COMPONENT DISPATCHER */}
                 {activeTab === 'board' && (
-                  tourneyOverlay ? (
+                  spectating ? (
+                    <TournamentSpectator email={email} onClose={() => setSpectating(false)} />
+                  ) : tourneyOverlay ? (
                     <TournamentScreen
                       phase={tourneyPhase as 'join' | 'lobby' | 'waiting' | 'eliminated' | 'champion'}
                       info={tourneyInfo}
                       onGoToCashier={() => setActiveTab('cashier')}
+                      onWatch={() => setSpectating(true)}
                       ticketCount={profile?.tickets ?? 0}
                       freeGameAvailable={!!config?.freeGameEnabled && !!profile && !profile.freeGameUsed}
                       canAfford={(profile?.tickets ?? 0) > 0 || (!!config?.freeGameEnabled && !!profile && !profile.freeGameUsed)}

@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { Hourglass, Crown, Trophy, Swords, Wallet, Users, Loader2, Ticket, Gift, AlertCircle, MessageSquare, Send } from 'lucide-react';
+import { Hourglass, Crown, Trophy, Swords, Wallet, Users, Loader2, Ticket, Gift, AlertCircle, MessageSquare, Send, Eye } from 'lucide-react';
 import { formatNaira } from '../currency.js';
 import { ChatMessage } from '../types.js';
 
@@ -18,6 +18,7 @@ interface TournamentScreenProps {
   phase: TourneyPhase;
   info: TournamentInfo;
   onGoToCashier: () => void;
+  onWatch?: () => void;
   // 'join' phase extras
   ticketCount?: number;
   freeGameAvailable?: boolean;
@@ -33,7 +34,7 @@ interface TournamentScreenProps {
   myName?: string;
 }
 
-export default function TournamentScreen({ phase, info, onGoToCashier, ticketCount = 0, freeGameAvailable = false, canAfford = false, error = '', registering = false, onRegister, chatMessages = [], chatInput = '', onChatInput, onSendChat, myName }: TournamentScreenProps) {
+export default function TournamentScreen({ phase, info, onGoToCashier, onWatch, ticketCount = 0, freeGameAvailable = false, canAfford = false, error = '', registering = false, onRegister, chatMessages = [], chatInput = '', onChatInput, onSendChat, myName }: TournamentScreenProps) {
   return (
     <div className="w-full max-w-md mx-auto py-10 space-y-4">
       <motion.div
@@ -141,12 +142,22 @@ export default function TournamentScreen({ phase, info, onGoToCashier, ticketCou
               You were eliminated in Round {info.round ?? ''}. Good run — the deck wasn't kind this time.
               Grab more tickets and jump into the next tournament.
             </p>
-            <button
-              onClick={onGoToCashier}
-              className="mt-5 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-neon-purple hover:bg-neon-purple/90 text-white font-mono font-bold text-xs cursor-pointer"
-            >
-              <Wallet className="w-4 h-4" /> Buy Tickets
-            </button>
+            <div className="mt-5 flex flex-col items-center gap-2">
+              {onWatch && (
+                <button
+                  onClick={onWatch}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-neon-cyan/10 border border-neon-cyan/40 text-neon-cyan font-mono font-bold text-xs cursor-pointer"
+                >
+                  <Eye className="w-4 h-4" /> Watch the tournament
+                </button>
+              )}
+              <button
+                onClick={onGoToCashier}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-neon-purple hover:bg-neon-purple/90 text-white font-mono font-bold text-xs cursor-pointer"
+              >
+                <Wallet className="w-4 h-4" /> Buy Tickets
+              </button>
+            </div>
           </>
         )}
 
