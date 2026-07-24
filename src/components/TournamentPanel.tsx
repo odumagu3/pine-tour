@@ -94,8 +94,11 @@ export default function TournamentPanel({ email, passcode, sponsorName = '', spo
     <div className="bg-dark-card border border-neon-green/20 rounded-2xl p-5 shadow-lg space-y-4">
       <h3 className="text-sm font-bold font-display text-white flex items-center gap-2">
         <span className="text-neon-green"><Trophy className="w-4 h-4" /></span>
-        Live Tournament <span className="text-[10px] font-mono text-slate-500">(Knockout Bracket)</span>
+        Run the Tournament <span className="text-[10px] font-mono text-slate-500">(Knockout)</span>
       </h3>
+      <p className="text-[10px] font-mono text-slate-400 -mt-2">
+        This launches the tournament you set up above so real players can join. Steps: <span className="text-neon-green">Create</span> (opens registration) → players register (or add AI to test) → <span className="text-neon-purple">Start</span>.
+      </p>
 
       {error && (
         <div className="p-3 bg-red-950/40 border border-red-500/30 rounded-lg text-xs text-red-400 font-mono flex items-center gap-2">
@@ -148,7 +151,7 @@ export default function TournamentPanel({ email, passcode, sponsorName = '', spo
         <div className="space-y-2">
           {sponsorName && sponsorPrize > 0 ? (
             <p className="text-[11px] text-slate-300 font-mono">
-              Ready to launch: <span className="text-white font-bold">{sponsorName}</span> · <span className="text-neon-green font-bold">{formatNaira(sponsorPrize)}</span>. This is the step that actually runs your tournament.
+              Ready to launch: <span className="text-white font-bold">{sponsorName}</span> · <span className="text-neon-green font-bold">{formatNaira(sponsorPrize)}</span>. Create <span className="text-neon-green">opens registration</span> so real players can join it from their lobby.
             </p>
           ) : (
             <p className="text-[11px] text-amber-400 font-mono">
@@ -164,9 +167,12 @@ export default function TournamentPanel({ email, passcode, sponsorName = '', spo
 
       {exists && st === 'registering' && (
         <div className="space-y-3">
+          <div className="rounded-lg border border-neon-green/30 bg-neon-green/5 px-3 py-2 text-[11px] font-mono text-neon-green">
+            ✅ Registration is OPEN — real players can join now from their lobby ({status?.entrantCount ?? 0} in). Press <span className="font-bold">Start</span> when ready. The AI simulator below is optional (for testing on your own).
+          </div>
           <div className="flex items-end gap-2">
             <div className="flex-1">
-              <label className="block text-[10px] font-mono text-slate-400 mb-1 uppercase tracking-wide">Simulated players to add</label>
+              <label className="block text-[10px] font-mono text-slate-400 mb-1 uppercase tracking-wide">Add AI (optional, for testing)</label>
               <input
                 type="number" min={1} max={200} value={simCount}
                 onChange={(e) => setSimCount(Math.max(1, Math.min(200, Number(e.target.value) || 1)))}
