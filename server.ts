@@ -553,6 +553,13 @@ function resolveMarketExhausted(roomId: string) {
     });
   }
 
+  // All Hands: keep the knocked-out player on a persistent rail (name, seat
+  // colour, and the card count they held) so everyone can see who's out.
+  if (isAllHands) {
+    if (!room.eliminated) room.eliminated = [];
+    room.eliminated.push({ name: eliminated.name, color: eliminated.color, cardsCount: eliminated.hand.length });
+  }
+
   // Remove the eliminated player from the table.
   room.players = room.players.filter(p => p.id !== eliminated.id);
 
@@ -983,6 +990,7 @@ function getOrCreateAllHandsRoom(): GameState {
       discardPile: [],
       requestedSuit: null,
       turnDirection: 1,
+      eliminated: [],
     };
   }
   return room;
@@ -1061,6 +1069,7 @@ function seatAllHandsHuman(room: GameState, email: string, name: string): Player
 function startAllHands(room: GameState) {
   fillAllHandsBots(room);
   room.pot = room.sponsorPrize;
+  room.eliminated = []; // fresh game — clear the knocked-out rail
   startWhotGameSession(room);
 }
 
@@ -1082,6 +1091,7 @@ function resetAllHandsRoom(room: GameState) {
   room.sponsorName = sponsorName;
   room.sponsorPrize = prize;
   room.pot = prize;
+  room.eliminated = []; // clear the knocked-out rail
   room.players = []; // everyone re-enters for a fresh game
   room.logs.push({
     id: 'log_ah_reset_' + Date.now(),

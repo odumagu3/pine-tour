@@ -523,6 +523,31 @@ export default function GameBoard({
               {/* OVAL FELT INNER LINE BORDER */}
               <div className="absolute inset-4 sm:inset-8 border border-emerald-500/10 rounded-[30px] sm:rounded-[60px] pointer-events-none" />
 
+              {/* KNOCKED-OUT RAIL (All Hands on Deck) — a persistent corner list
+                  of eliminated players + the cards they held when they went out,
+                  so everyone can see who's out while the survivors play on. */}
+              {gameState.eliminated && gameState.eliminated.length > 0 && (
+                <div className="absolute top-1.5 left-1.5 sm:top-3 sm:left-3 z-30 bg-slate-950/85 border border-red-500/30 rounded-lg px-2 py-1.5 max-w-[42%] pointer-events-none">
+                  <div className="text-[7px] sm:text-[8px] font-mono uppercase tracking-wider text-red-400/90 mb-1">💀 Knocked out</div>
+                  <div className="space-y-0.5">
+                    {gameState.eliminated.map((e, i) => {
+                      const dot =
+                        e.color === 'red' ? 'bg-rose-400' :
+                        e.color === 'green' ? 'bg-emerald-400' :
+                        e.color === 'yellow' ? 'bg-amber-400' :
+                        e.color === 'blue' ? 'bg-cyan-400' : 'bg-slate-600';
+                      return (
+                        <div key={i} className="flex items-center gap-1 text-[8px] sm:text-[10px] font-mono text-slate-400">
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dot}`} />
+                          <span className="truncate line-through decoration-red-500/50 max-w-[64px] sm:max-w-[110px]">{e.name}</span>
+                          <span className="text-slate-500 flex-shrink-0">🎴{e.cardsCount}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* SEATED PLAYERS PLACEMENT AROUND TABLE */}
               {seats.map((seat) => {
                 const isMe = seat.player.id === activePlayerEmail;

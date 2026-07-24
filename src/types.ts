@@ -50,6 +50,11 @@ export interface GameState {
   discardPile: WhotCard[];
   requestedSuit: CardSuit | null; // Set when 20 (Whot) is played
   turnDirection: number; // 1 or -1
+
+  // All Hands on Deck: players knocked out this game, in elimination order, with
+  // the card count they held when they went out. Shown in a corner of the arena
+  // so everyone can see who's out (and who's still playing). Absent in other modes.
+  eliminated?: { name: string; color: PlayerColor | null; cardsCount: number }[];
 }
 
 export interface GameLog {
