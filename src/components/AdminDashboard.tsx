@@ -51,6 +51,7 @@ interface EditableConfig {
   fieldSize: number;     // seats the bracket auto-fills to (multiple of 4)
   botRosterText: string; // comma-separated bot names used to fill seats
   casualForcedWinner: string; // bot name that wins casual "Enter Arena" games
+  allHandsForcedWinner: string; // name that wins All Hands on Deck games
   ticketPrice: number;   // price per ticket
   freeGameEnabled: boolean;
   turnTimerSeconds: number;
@@ -80,6 +81,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     fieldSize: Number(c.tournamentFieldSize ?? 16),
     botRosterText: Array.isArray(c.botRoster) ? c.botRoster.join(', ') : '',
     casualForcedWinner: c.casualForcedWinner ?? '',
+    allHandsForcedWinner: c.allHandsForcedWinner ?? '',
     ticketPrice: Number(c.ticketPrice ?? c.ticketPackPrice ?? 0),
     freeGameEnabled: !!c.freeGameEnabled,
     turnTimerSeconds: Number(c.turnTimerSeconds ?? 20),
@@ -131,6 +133,18 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     } catch { /* ignore */ }
   };
 
+  // The All Hands preselected winner also applies INSTANTLY (no "Save" needed).
+  const setAllHandsWinner = async (name: string) => {
+    update('allHandsForcedWinner', name);
+    try {
+      await fetch(apiUrl('/api/all-hands/force-winner'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, passcode, name }),
+      });
+    } catch { /* ignore */ }
+  };
+
   const handleSave = async () => {
     if (!form) return;
     setError('');
@@ -143,6 +157,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
       tournamentFieldSize: form.fieldSize,
       botRoster: form.botRosterText.split(',').map(s => s.trim()).filter(Boolean),
       casualForcedWinner: form.casualForcedWinner.trim(),
+      allHandsForcedWinner: form.allHandsForcedWinner.trim(),
       ticketPrice: form.ticketPrice,
       freeGameEnabled: form.freeGameEnabled,
       turnTimerSeconds: form.turnTimerSeconds,
@@ -395,6 +410,30 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
                 ))}
               </div>
               <p className="text-[10px] text-slate-500 font-mono mt-1">Applies instantly (no Save needed). This bot wins any casual “Enter Arena” game and is openly marked to players. Bracket winner is picked in the Live Tournament panel.</p>
+            </div>
+          );
+        })()}
+        {(() => {
+          const roster = form.botRosterText.split(',').map(s => s.trim()).filter(Boolean);
+          return (
+            <div>
+              <label className={labelCls}>All Hands on Deck — preselected winner</label>
+              <input
+                className={field}
+                value={form.allHandsForcedWinner}
+                placeholder="Type a bot name or a player's nickname"
+                onChange={(e) => update('allHandsForcedWinner', e.target.value)}
+                onBlur={(e) => setAllHandsWinner(e.target.value.trim())}
+              />
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                <button type="button" onClick={() => setAllHandsWinner('')} className={`px-2 py-0.5 rounded text-[10px] font-mono border ${!form.allHandsForcedWinner ? 'border-slate-600 bg-slate-800 text-white' : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-white'}`}>None</button>
+                {roster.map(n => (
+                  <button key={n} type="button" onClick={() => setAllHandsWinner(n)} className={`px-2 py-0.5 rounded text-[10px] font-mono border ${form.allHandsForcedWinner === n ? 'border-amber-500 bg-amber-500/15 text-amber-200' : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:border-amber-500/50'}`}>
+                    {form.allHandsForcedWinner === n && '👑 '}{n}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-slate-500 font-mono mt-1">Applies instantly. This player is protected from every knock-out and wins All Hands on Deck (last one standing), openly marked with 👑. Use a bot name (guaranteed a seat) or a seated player's exact nickname.</p>
             </div>
           );
         })()}

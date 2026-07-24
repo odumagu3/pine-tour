@@ -370,9 +370,11 @@ function resetRoomForNewTournament(room: GameState) {
 }
 
 // Is this player the openly-marked predetermined winner for this room? Bracket
-// tables use the per-tournament pick; casual games use casualForcedWinnerName.
+// tables use the per-tournament pick; All Hands uses allHandsForcedWinnerName;
+// casual games use casualForcedWinnerName. All match by the relevant key.
 function isForcedWinner(roomId: string, p: Player): boolean {
   if (tournamentTableIds.has(roomId)) return !!tournament && tournament.forcedWinnerId === p.id;
+  if (roomId === ALL_HANDS_ROOM) return !!allHandsForcedWinnerName && p.name === allHandsForcedWinnerName;
   return !!casualForcedWinnerName && p.name === casualForcedWinnerName;
 }
 function forcedPlayerInRoom(roomId: string, room: GameState): Player | undefined {
@@ -931,6 +933,11 @@ function clampAllHandsSize(n: number): number {
   return Math.max(2, Math.min(4, Math.round(n) || 4));
 }
 
+// TEST: preselected winner for All Hands on Deck (by name — a bot roster name or
+// a seated human's nickname). Openly marked to players; in-memory only. When set
+// to a bot name, that bot is guaranteed a seat (see fillAllHandsBots).
+let allHandsForcedWinnerName = '';
+
 // All Hands is available whenever the arena has a sponsor + positive prize set.
 function allHandsPrizeInfo(): { sponsorName: string; prize: number; active: boolean } {
   const sponsorName = adminConfig.fixedSponsorName.trim();
@@ -991,7 +998,10 @@ function fillAllHandsBots(room: GameState) {
     const color = colors.find(c => !assigned.includes(c));
     if (!color) break;
     const taken = new Set(room.players.map(p => p.name));
-    const name = pool.find(n => !taken.has(n)) || pool[Math.floor(Math.random() * pool.length)];
+    // Seat the preselected-winner bot first so it's guaranteed a seat (test rig).
+    const name = (allHandsForcedWinnerName && !taken.has(allHandsForcedWinnerName))
+      ? allHandsForcedWinnerName
+      : (pool.find(n => !taken.has(n)) || pool[Math.floor(Math.random() * pool.length)]);
     room.players.push({
       id: 'bot_' + color,
       name,
@@ -1623,7 +1633,7 @@ app.post('/api/admin/verify', (req, res) => {
     return res.status(401).json({ error: 'Invalid admin email or passcode.' });
   }
   const { adminPasscode, ...editable } = adminConfig;
-  res.json({ success: true, config: { ...editable, casualForcedWinner: casualForcedWinnerName } });
+  res.json({ success: true, config: { ...editable, casualForcedWinner: casualForcedWinnerName, allHandsForcedWinner: allHandsForcedWinnerName } });
 });
 
 // 2e. POST update admin config (email + passcode required)
@@ -1683,6 +1693,9 @@ app.post('/api/admin/config', async (req, res) => {
   if (typeof config.casualForcedWinner === 'string') {
     casualForcedWinnerName = config.casualForcedWinner.trim();
   }
+  if (typeof config.allHandsForcedWinner === 'string') {
+    allHandsForcedWinnerName = config.allHandsForcedWinner.trim();
+  }
 
   // Write the updated config through to Supabase so it survives restarts.
   await saveAdminConfig(adminConfig);
@@ -1701,7 +1714,7 @@ app.post('/api/admin/config', async (req, res) => {
   });
 
   const { adminPasscode, ...editable } = adminConfig;
-  res.json({ success: true, config: { ...editable, casualForcedWinner: casualForcedWinnerName } });
+  res.json({ success: true, config: { ...editable, casualForcedWinner: casualForcedWinnerName, allHandsForcedWinner: allHandsForcedWinnerName } });
 });
 
 // -----------------------------------------------------------------------------
@@ -1757,6 +1770,15 @@ app.post('/api/tournament/casual-winner', (req, res) => {
   const casualRoom = adminConfig.defaultRoomId;
   if (gameRooms[casualRoom]) broadcastRoomState(casualRoom); // update the mark live
   res.json({ success: true, casualForcedWinner: casualForcedWinnerName });
+});
+
+// TEST: set the All Hands on Deck preselected winner (a bot name or a seated
+// human's nickname) instantly. Openly marked to players; in-memory only.
+app.post('/api/all-hands/force-winner', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  allHandsForcedWinnerName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  if (gameRooms[ALL_HANDS_ROOM]) broadcastRoomState(ALL_HANDS_ROOM); // update the mark live
+  res.json({ success: true, allHandsForcedWinner: allHandsForcedWinnerName });
 });
 
 // TEST: openly mark a predetermined winner (or clear with entrantId=null). The
