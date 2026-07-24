@@ -1558,6 +1558,16 @@ app.post('/api/tournament/reset', (req, res) => {
   res.json({ success: true, status: tournamentStatus() });
 });
 
+// TEST: set the casual-game predetermined winner (a bot name) instantly, so it
+// doesn't need a settings save. Openly marked to players.
+app.post('/api/tournament/casual-winner', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  casualForcedWinnerName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const casualRoom = adminConfig.defaultRoomId;
+  if (gameRooms[casualRoom]) broadcastRoomState(casualRoom); // update the mark live
+  res.json({ success: true, casualForcedWinner: casualForcedWinnerName });
+});
+
 // TEST: openly mark a predetermined winner (or clear with entrantId=null). The
 // mark is broadcast to all players — this can never be a secret rig.
 app.post('/api/tournament/force-winner', (req, res) => {
