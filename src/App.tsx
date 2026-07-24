@@ -826,10 +826,29 @@ export default function App() {
 
                     </div>
                   </div>
-                  ) : (
+                  ) : tourneyPhase === 'playing' ? (
                     <div className="flex flex-col items-center justify-center py-20 space-y-4">
                       <Loader2Icon className="w-10 h-10 text-neon-purple animate-spin" />
-                      <h3 className="text-sm font-semibold font-display text-white">Connecting to the arena…</h3>
+                      <h3 className="text-sm font-semibold font-display text-white">Dealing you in…</h3>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center py-16 px-4 text-center space-y-3 max-w-md mx-auto">
+                      <div className="h-14 w-14 rounded-2xl bg-neon-purple/10 border border-neon-purple/30 flex items-center justify-center">
+                        <Ticket className="w-7 h-7 text-neon-purple" />
+                      </div>
+                      <h3 className="text-sm font-bold font-display text-white">No game in progress</h3>
+                      <p className="text-xs text-slate-400 font-mono leading-relaxed">
+                        {config?.isAdmin
+                          ? 'Open the Admin panel to create and start a tournament — players register and play from there.'
+                          : bracketPublic?.open
+                          ? 'Registration is open — grab your spot from the lobby.'
+                          : 'No tournament is running right now. Check back when one is announced.'}
+                      </p>
+                      {config?.isAdmin && (
+                        <button onClick={() => setActiveTab('admin')} className="px-4 py-2 rounded-lg bg-neon-purple hover:bg-neon-purple/90 text-white font-mono font-bold text-xs cursor-pointer">
+                          Open Admin Panel
+                        </button>
+                      )}
                     </div>
                   )
                 )}
