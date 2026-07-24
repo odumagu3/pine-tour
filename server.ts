@@ -369,9 +369,10 @@ function resetRoomForNewTournament(room: GameState) {
   });
 }
 
-// Is this player the openly-marked predetermined winner for this room? Bracket
-// tables use the per-tournament pick; All Hands uses allHandsForcedWinnerName;
-// casual games use casualForcedWinnerName. All match by the relevant key.
+// Is this player the SILENT preselected winner for this room? Bracket tables use
+// the per-tournament pick; All Hands uses allHandsForcedWinnerName; casual games
+// use casualForcedWinnerName. All match by the relevant key. This is admin-only
+// knowledge — it is never sent to clients, logged, or announced anywhere.
 function isForcedWinner(roomId: string, p: Player): boolean {
   if (tournamentTableIds.has(roomId)) return !!tournament && tournament.forcedWinnerId === p.id;
   if (roomId === ALL_HANDS_ROOM) return !!allHandsForcedWinnerName && p.name === allHandsForcedWinnerName;
@@ -387,10 +388,11 @@ function broadcastRoomState(roomId: string) {
   if (!state) return;
 
   // Never reveal that a seat is a bot — to players every opponent is a human.
-  // Openly flag the predetermined winner (test feature) so all players can see it.
+  // The preselected winner is NEVER flagged: no mark leaves the server, so the
+  // rigged seat looks exactly like every other seat.
   const safeState = {
     ...state,
-    players: state.players.map(p => ({ ...p, isBot: false, predestined: isForcedWinner(roomId, p) })),
+    players: state.players.map(p => ({ ...p, isBot: false })),
   };
   const payload = JSON.stringify({ type: 'state-sync', state: safeState });
   Object.keys(activeConnections).forEach(connId => {
@@ -406,8 +408,9 @@ function endWhotGame(roomId: string, winnerId: string) {
   const room = gameRooms[roomId];
   if (!room || room.status !== 'playing') return;
 
-  // TEST feature: if an openly-marked predetermined winner is at this table
-  // (bracket pick or casual forced winner), they win it.
+  // TEST feature: if a silently preselected winner is at this table (All Hands
+  // pick, bracket pick or casual forced winner), they win it — no announcement,
+  // the result reads like any other win.
   const forcedWin = forcedPlayerInRoom(roomId, room);
   if (forcedWin) winnerId = forcedWin.id;
 
@@ -503,7 +506,7 @@ function resolveMarketExhausted(roomId: string) {
   const isTourney = tournamentTableIds.has(roomId);
   const isAllHands = room.mode === 'all-hands';
 
-  // The predetermined winner (test feature) is never eliminated.
+  // The silently preselected winner (test feature) is never eliminated.
   const forcedWin = forcedPlayerInRoom(roomId, room);
 
   // Highest total card value is eliminated (ties broken by seat order); the
@@ -604,7 +607,7 @@ interface Tournament {
   sponsorName: string;
   prize: number;
   aiEligible: boolean;              // may AI entrants win the prize? (test mode)
-  forcedWinnerId: string | null;    // TEST: openly-marked predetermined winner
+  forcedWinnerId: string | null;    // TEST: silent preselected winner (admin-only)
   entrants: TournamentEntrant[];
   rounds: TournamentRound[];
   currentRound: number;             // 1-based
@@ -941,8 +944,9 @@ function clampAllHandsSize(n: number): number {
 }
 
 // TEST: preselected winner for All Hands on Deck (by name — a bot roster name or
-// a seated human's nickname). Openly marked to players; in-memory only. When set
-// to a bot name, that bot is guaranteed a seat (see fillAllHandsBots).
+// a seated human's nickname). SILENT: never marked, logged or announced to
+// players; in-memory only and visible to the admin dashboard alone. When set to
+// a bot name, that bot is guaranteed a seat (see fillAllHandsBots).
 let allHandsForcedWinnerName = '';
 
 // All Hands is available whenever the arena has a sponsor + positive prize set.
@@ -1839,8 +1843,8 @@ app.post('/api/tournament/reset', (req, res) => {
   res.json({ success: true, status: tournamentStatus() });
 });
 
-// TEST: set the casual-game predetermined winner (a bot name) instantly, so it
-// doesn't need a settings save. Openly marked to players.
+// TEST: set the casual-game preselected winner (a bot name) instantly, so it
+// doesn't need a settings save. Silent — players are never told.
 app.post('/api/tournament/casual-winner', (req, res) => {
   if (!requireAdmin(req, res)) return;
   casualForcedWinnerName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
@@ -1850,16 +1854,16 @@ app.post('/api/tournament/casual-winner', (req, res) => {
 });
 
 // TEST: set the All Hands on Deck preselected winner (a bot name or a seated
-// human's nickname) instantly. Openly marked to players; in-memory only.
+// human's nickname) instantly. Silent: nothing is broadcast, marked or announced
+// — the pick only changes who survives to the end. In-memory only.
 app.post('/api/all-hands/force-winner', (req, res) => {
   if (!requireAdmin(req, res)) return;
   allHandsForcedWinnerName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
-  if (gameRooms[ALL_HANDS_ROOM]) broadcastRoomState(ALL_HANDS_ROOM); // update the mark live
   res.json({ success: true, allHandsForcedWinner: allHandsForcedWinnerName });
 });
 
-// TEST: openly mark a predetermined winner (or clear with entrantId=null). The
-// mark is broadcast to all players — this can never be a secret rig.
+// TEST: silently pick a winner (or clear with entrantId=null). Nothing is
+// announced or marked — players only ever see the normal result.
 app.post('/api/tournament/force-winner', (req, res) => {
   if (!requireAdmin(req, res)) return;
   if (!tournament) return res.status(400).json({ error: 'No tournament.' });
@@ -1868,18 +1872,7 @@ app.post('/api/tournament/force-winner', (req, res) => {
     return res.status(400).json({ error: 'That entrant is not in this tournament.' });
   }
   tournament.forcedWinnerId = entrantId;
-  const name = entrantId ? (entrantById(entrantId)?.name ?? 'the picked player') : null;
-  // Announce it in the shared arena chat + push the mark to every live table.
-  if (name) {
-    broadcastArenaChat({
-      id: 'chat_sys_' + Date.now(),
-      senderName: 'ANNOUNCER',
-      senderColor: null,
-      message: `📢 Test tournament: ${name} is the predetermined winner.`,
-      timestamp: new Date().toISOString(),
-    }, '');
-  }
-  Object.keys(gameRooms).forEach(rid => { if (tournamentTableIds.has(rid)) broadcastRoomState(rid); });
+  // No arena-chat announcement and no per-table mark: the pick stays admin-only.
   res.json({ success: true, status: tournamentStatus() });
 });
 
@@ -1900,7 +1893,8 @@ app.get('/api/tournament/spectate', (_req, res) => {
     currentRound: tournament.currentRound,
     totalRounds: tournament.rounds.length,
     championName: tournament.championId ? nameOf(tournament.championId) : null,
-    forcedWinnerName: tournament.forcedWinnerId ? nameOf(tournament.forcedWinnerId) : null,
+    // forcedWinnerName is deliberately NOT exposed here — spectators must never
+    // be able to tell who was preselected.
     rounds: tournament.rounds.map(r => ({
       index: r.index,
       byes: r.byes.map(nameOf),
@@ -1935,8 +1929,7 @@ app.get('/api/tournament/table', (req, res) => {
       ...p,
       isBot: false,              // never reveal bots, same as broadcastRoomState
       hand: [],                  // hide hands from spectators
-      predestined: p.id === (tournament?.forcedWinnerId || null),
-    })),
+    })),                         // and never reveal the preselected winner
     pot: room.pot,
     activePlayerIndex: room.activePlayerIndex,
     logs: room.logs.slice(-40),
@@ -1965,7 +1958,6 @@ app.get('/api/tournament/table', (req, res) => {
       color: p.color,
       cardsCount: p.cardsCount,
       active: room.status === 'playing' && i === room.activePlayerIndex,
-      predestined: p.id === (tournament?.forcedWinnerId || null),
     })),
     logs: room.logs.slice(-30).map(l => ({ message: l.message, type: l.type, timestamp: l.timestamp })),
     state: specState,

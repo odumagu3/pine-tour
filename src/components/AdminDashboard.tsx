@@ -389,7 +389,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
                 <button type="button" onClick={() => setCasualWinner('')} className={`px-2 py-0.5 rounded text-[10px] font-mono border ${!form.casualForcedWinner ? 'border-slate-600 bg-slate-800 text-white' : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-white'}`}>None</button>
                 {roster.map(n => (
                   <button key={n} type="button" onClick={() => setCasualWinner(n)} className={`px-2 py-0.5 rounded text-[10px] font-mono border ${form.casualForcedWinner === n ? 'border-amber-500 bg-amber-500/15 text-amber-200' : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:border-amber-500/50'}`}>
-                    {form.casualForcedWinner === n && '👑 '}{n}
+                    {form.casualForcedWinner === n && '✓ '}{n}
                   </button>
                 ))}
               </div>
@@ -413,11 +413,11 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
                 <button type="button" onClick={() => setAllHandsWinner('')} className={`px-2 py-0.5 rounded text-[10px] font-mono border ${!form.allHandsForcedWinner ? 'border-slate-600 bg-slate-800 text-white' : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-white'}`}>None</button>
                 {roster.map(n => (
                   <button key={n} type="button" onClick={() => setAllHandsWinner(n)} className={`px-2 py-0.5 rounded text-[10px] font-mono border ${form.allHandsForcedWinner === n ? 'border-amber-500 bg-amber-500/15 text-amber-200' : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:border-amber-500/50'}`}>
-                    {form.allHandsForcedWinner === n && '👑 '}{n}
+                    {form.allHandsForcedWinner === n && '✓ '}{n}
                   </button>
                 ))}
               </div>
-              <p className="text-[10px] text-slate-500 font-mono mt-1">Applies instantly. This player is protected from every knock-out and wins All Hands on Deck (last one standing), openly marked with 👑. Use a bot name (guaranteed a seat) or a seated player's exact nickname.</p>
+              <p className="text-[10px] text-slate-500 font-mono mt-1">Applies instantly and <strong>silently</strong>: this player is protected from every knock-out and wins All Hands on Deck (last one standing). No crown, no mark on the table, no chat announcement — only you see the pick, here. Use a bot name (guaranteed a seat) or a seated player's exact nickname.</p>
             </div>
           );
         })()}

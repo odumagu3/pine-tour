@@ -12,7 +12,6 @@ interface Spectate {
   currentRound?: number;
   totalRounds?: number;
   championName?: string | null;
-  forcedWinnerName?: string | null;
   rounds?: SpecRound[];
 }
 
@@ -32,8 +31,6 @@ export default function TournamentSpectator({ email, onClose, profile, config }:
     const id = window.setInterval(poll, 2500);
     return () => { alive = false; window.clearInterval(id); };
   }, []);
-
-  const forced = spec?.forcedWinnerName || null;
 
   return (
     <div className="w-full max-w-lg mx-auto py-6 space-y-4">
@@ -77,10 +74,9 @@ export default function TournamentSpectator({ email, onClose, profile, config }:
                     {!t.done && <span className="float-right text-slate-500 group-hover:text-neon-cyan inline-flex items-center gap-0.5"><Eye className="w-3 h-3" />watch</span>}
                     {t.players.map((name, j) => {
                       const isWinner = t.done && name === t.winner;
-                      const isForced = forced && name === forced;
                       return (
-                        <span key={j} className={`inline-flex items-center gap-1 mr-2 ${isWinner ? 'text-neon-green font-bold' : isForced ? 'text-amber-300 font-bold' : 'text-slate-400'}`}>
-                          {isWinner && <Crown className="w-3 h-3" />}{isForced && '👑'}{name}
+                        <span key={j} className={`inline-flex items-center gap-1 mr-2 ${isWinner ? 'text-neon-green font-bold' : 'text-slate-400'}`}>
+                          {isWinner && <Crown className="w-3 h-3" />}{name}
                         </span>
                       );
                     })}
@@ -93,7 +89,7 @@ export default function TournamentSpectator({ email, onClose, profile, config }:
         </div>
       )}
 
-      {watch && <WatchTable email={email} roomId={watch.roomId} label={watch.label} forcedName={forced} profile={profile} config={config} onClose={() => setWatch(null)} />}
+      {watch && <WatchTable email={email} roomId={watch.roomId} label={watch.label} profile={profile} config={config} onClose={() => setWatch(null)} />}
     </div>
   );
 }
@@ -109,7 +105,7 @@ interface TableSnap {
 // GameBoard, driven by a spectator-safe full state polled from the server
 // (hands hidden — you see the board, seats, top card, market and the live play,
 // but not anyone's cards). Read-only: with no seat there are no play controls.
-function WatchTable({ email, roomId, label, profile, config, onClose }: { email: string; roomId: string; label: string; forcedName: string | null; profile: UserProfile | null; config: PublicConfig | null; onClose: () => void }) {
+function WatchTable({ email, roomId, label, profile, config, onClose }: { email: string; roomId: string; label: string; profile: UserProfile | null; config: PublicConfig | null; onClose: () => void }) {
   const [snap, setSnap] = useState<TableSnap | null>(null);
   useEffect(() => {
     let alive = true;
