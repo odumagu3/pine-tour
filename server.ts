@@ -1585,6 +1585,73 @@ app.post('/api/profile/deposit', async (req, res) => {
   res.json({ success: true, transaction: newTx, balance: profile.balance });
 });
 
+// -----------------------------------------------------------------------------
+// PAYSTACK (SIMULATED) payment gateway.
+// Mimics Paystack's real flows WITHOUT the live API or real money:
+//   • Deposit  = initialize → checkout popup → verify (credits the wallet).
+//   • Withdraw = resolve bank account → transfer (see /api/profile/withdraw).
+// Going live later = swap these handlers for real Paystack API calls + the
+// inline Paystack.js popup; the client contract stays the same.
+// -----------------------------------------------------------------------------
+interface PaystackPending { email: string; amount: number; status: 'pending' | 'success'; createdAt: number; }
+const paystackPending: Record<string, PaystackPending> = {};
+function genPaystackRef(prefix = 'T'): string {
+  return prefix + Date.now().toString().slice(-9) + Math.floor(Math.random() * 9000 + 1000);
+}
+
+// Initialize a deposit — returns the reference the checkout will pay against.
+app.post('/api/paystack/initialize', async (req, res) => {
+  const { email, amount } = req.body;
+  const amt = parseFloat(amount);
+  if (!email || isNaN(amt) || amt <= 0) return res.status(400).json({ status: false, error: 'Enter a valid amount to fund.' });
+  if (amt < 100) return res.status(400).json({ status: false, error: 'Minimum deposit is ₦100.' });
+  await ensureProfile(email);
+  const reference = genPaystackRef();
+  paystackPending[reference] = { email: String(email).toLowerCase().trim(), amount: amt, status: 'pending', createdAt: Date.now() };
+  res.json({
+    status: true,
+    reference,
+    access_code: 'ac_' + Math.random().toString(36).slice(2, 12),
+    authorization_url: `https://checkout.paystack.com/${reference}`, // sim opens an in-app popup
+    amount_kobo: Math.round(amt * 100), // Paystack works in kobo
+  });
+});
+
+// Verify a deposit — credits the wallet once the checkout reports "paid".
+app.post('/api/paystack/verify', async (req, res) => {
+  const { reference } = req.body;
+  const pending = reference ? paystackPending[reference] : undefined;
+  if (!pending) return res.status(404).json({ status: false, error: 'Unknown or expired transaction reference.' });
+  const profile = await ensureProfile(pending.email);
+  if (pending.status !== 'success') {
+    pending.status = 'success';
+    profile.balance += pending.amount;
+    addTransaction(pending.email, {
+      id: generateHash(),
+      type: 'deposit',
+      amount: pending.amount,
+      status: 'completed',
+      timestamp: new Date().toISOString(),
+      method: 'Paystack',
+      txHash: reference,
+      balanceAfter: profile.balance,
+    });
+    saveProfile(pending.email);
+  }
+  res.json({ status: true, data: { status: 'success', reference, amount_kobo: Math.round(pending.amount * 100) }, balance: profile.balance });
+});
+
+// Resolve a bank account (for withdrawals) — returns the account holder's name.
+const NG_NAME_POOL = ['CHIDI OKAFOR', 'AMARA NWOSU', 'TUNDE ADEYEMI', 'ZAINAB BELLO', 'EMEKA ELEZE', 'NGOZI EZE', 'YUSUF IBRAHIM', 'FUNKE ADEBAYO', 'MUSA ALIYU', 'BLESSING OKON'];
+app.post('/api/paystack/resolve-account', (req, res) => {
+  const { accountNumber, bank } = req.body;
+  const acct = String(accountNumber || '').replace(/\D/g, '');
+  if (acct.length !== 10) return res.status(400).json({ status: false, error: 'Account number must be 10 digits.' });
+  // Deterministic pseudo-name so the same number always resolves the same way.
+  const name = NG_NAME_POOL[parseInt(acct.slice(-2), 10) % NG_NAME_POOL.length];
+  res.json({ status: true, data: { account_number: acct, account_name: name, bank_name: bank || '' } });
+});
+
 // 2b. POST Buy tournament tickets — any quantity between MIN_TICKETS and
 // MAX_TICKETS, priced per ticket and debited from the wallet.
 app.post('/api/profile/buy-tickets', async (req, res) => {
@@ -1928,7 +1995,8 @@ app.post('/api/profile/withdraw', async (req, res) => {
   }
 
   const txId = generateHash();
-  const txHash = 'tx_chain_' + Math.random().toString(36).substring(2, 10);
+  // Paystack transfer references start with TRF_.
+  const txHash = 'TRF_' + Math.random().toString(36).substring(2, 12);
 
   profile.balance -= parseFloat(amount);
 
@@ -1938,7 +2006,7 @@ app.post('/api/profile/withdraw', async (req, res) => {
     amount: parseFloat(amount),
     status: 'completed',
     timestamp: new Date().toISOString(),
-    method: method || 'Bank Transfer',
+    method: method || 'Paystack Transfer',
     txHash: txHash,
     balanceAfter: profile.balance,
   };

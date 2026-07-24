@@ -1,9 +1,13 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { UserProfile, Transaction, PublicConfig } from '../types.js';
-import { CreditCard, Wallet, ArrowDownLeft, ArrowUpRight, ShieldCheck, HelpCircle, Lock, Loader2, CheckCircle2, AlertCircle, Copy, Check, Ticket, Gift } from 'lucide-react';
+import { CreditCard, Wallet, ArrowDownLeft, ArrowUpRight, ShieldCheck, HelpCircle, Lock, Loader2, CheckCircle2, AlertCircle, Copy, Check, Ticket, Gift, Landmark } from 'lucide-react';
 import { formatNaira, TICKET_PRICE, MIN_TICKETS, MAX_TICKETS } from '../currency.js';
 import { apiUrl } from '../config.js';
+import PaystackCheckout from './PaystackCheckout.tsx';
+
+// Nigerian banks for the Paystack payout (withdrawal) flow.
+const NG_BANKS = ['Access Bank', 'GTBank', 'Zenith Bank', 'UBA', 'First Bank', 'Kuda', 'OPay', 'PalmPay', 'Fidelity Bank', 'Union Bank', 'Wema Bank', 'Sterling Bank'];
 
 interface FinancePortalProps {
   profile: UserProfile;
@@ -25,20 +29,19 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
   const [ticketError, setTicketError] = useState('');
   const totalCost = unitPrice * ticketQty;
 
-  // Deposit States
+  // Deposit States — Paystack checkout (initialize → popup → verify).
   const [depositAmount, setDepositAmount] = useState('5000');
-  const [depositMethod, setDepositMethod] = useState<'card' | 'crypto'>('card');
-  const [cardNumber, setCardNumber] = useState('4111 2222 3333 4444');
-  const [cardExpiry, setCardExpiry] = useState('12/28');
-  const [cardCVC, setCardCVC] = useState('954');
-  const [cryptoAddress, setCryptoAddress] = useState('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa');
-  const [depositStatus, setDepositStatus] = useState<'idle' | 'connecting' | 'authorizing' | 'signing' | 'completed' | 'failed'>('idle');
+  const [depositStatus, setDepositStatus] = useState<'idle' | 'completed'>('idle');
   const [depositError, setDepositError] = useState('');
+  const [initializing, setInitializing] = useState(false);
+  const [paystackRef, setPaystackRef] = useState<string | null>(null);
 
-  // Withdrawal States
+  // Withdrawal States — Paystack transfer to a Nigerian bank account.
   const [withdrawAmount, setWithdrawAmount] = useState('2000');
-  const [withdrawMethod, setWithdrawMethod] = useState('Bank Transfer');
-  const [withdrawAccount, setWithdrawAccount] = useState('DE89 5003 0000 1234 5678 90');
+  const [withdrawBank, setWithdrawBank] = useState(NG_BANKS[0]);
+  const [withdrawAccount, setWithdrawAccount] = useState('');
+  const [withdrawAccountName, setWithdrawAccountName] = useState('');
+  const [resolving, setResolving] = useState(false);
   const [withdrawPin, setWithdrawPin] = useState('');
   const [withdrawStatus, setWithdrawStatus] = useState<'idle' | 'processing' | 'completed'>('idle');
   const [withdrawError, setWithdrawError] = useState('');
@@ -94,82 +97,101 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
     }
   };
 
-  // Submit Deposit
+  // Deposit — initialize a Paystack transaction, then open the checkout popup.
   const handleDepositSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setDepositError('');
-    
     const amt = parseFloat(depositAmount);
-    if (isNaN(amt) || amt <= 0) {
-      setDepositError('Please specify a positive deposit amount.');
+    if (isNaN(amt) || amt < 100) {
+      setDepositError('Minimum deposit is ₦100.');
       return;
     }
-
-    // Step-by-step gateway simulation
-    setDepositStatus('connecting');
-    await new Promise(r => setTimeout(r, 1000));
-    setDepositStatus('authorizing');
-    await new Promise(r => setTimeout(r, 1200));
-    setDepositStatus('signing');
-    await new Promise(r => setTimeout(r, 900));
-
+    setInitializing(true);
     try {
-      const response = await fetch(apiUrl(`/api/profile/deposit`), {
+      const response = await fetch(apiUrl(`/api/paystack/initialize`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: profile.email,
-          amount: amt,
-          method: depositMethod === 'card' ? 'Visa •••• 4444' : 'Bitcoin Wallet',
-          cardNumber,
-          cardExpiry,
-          cardCVC,
-          cryptoAddress,
-        }),
+        body: JSON.stringify({ email: profile.email, amount: amt }),
       });
-
       const data = await response.json();
-      if (!response.ok) {
-        setDepositStatus('failed');
-        setDepositError(data.error || 'Payment gateway connection failed.');
+      if (!response.ok || !data.status) {
+        setDepositError(data.error || 'Could not start Paystack checkout.');
       } else {
-        setDepositStatus('completed');
-        onRefreshProfile();
-        setTimeout(() => {
-          setDepositStatus('idle');
-          setDepositAmount('100');
-        }, 3000);
+        setPaystackRef(data.reference); // opens the checkout modal
       }
     } catch (e) {
-      setDepositStatus('failed');
-      setDepositError('Lost connection to cashier service.');
+      setDepositError('Lost connection to the cashier service.');
+    } finally {
+      setInitializing(false);
     }
   };
 
-  // Submit Withdrawal
+  // Called by the checkout popup when the user "pays" — verify the reference.
+  const verifyPaystack = async (reference: string) => {
+    try {
+      const res = await fetch(apiUrl(`/api/paystack/verify`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reference }),
+      });
+      const data = await res.json();
+      if (res.ok && data.status) { onRefreshProfile(); return { ok: true }; }
+      return { ok: false, error: data.error || 'Payment verification failed.' };
+    } catch {
+      return { ok: false, error: 'Network error while verifying payment.' };
+    }
+  };
+
+  // The checkout closed — show a success banner if the wallet was credited.
+  const closePaystack = (credited: boolean) => {
+    setPaystackRef(null);
+    if (credited) {
+      setDepositStatus('completed');
+      onRefreshProfile();
+      setTimeout(() => setDepositStatus('idle'), 3000);
+    }
+  };
+
+  // Resolve the bank account number → account holder name (Paystack-style).
+  const resolveAccount = async (acct: string, bank: string) => {
+    const digits = acct.replace(/\D/g, '');
+    if (digits.length !== 10) { setWithdrawAccountName(''); return; }
+    setResolving(true);
+    setWithdrawError('');
+    try {
+      const res = await fetch(apiUrl(`/api/paystack/resolve-account`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountNumber: digits, bank }),
+      });
+      const data = await res.json();
+      if (res.ok && data.status) setWithdrawAccountName(data.data.account_name);
+      else { setWithdrawAccountName(''); setWithdrawError(data.error || 'Could not resolve account.'); }
+    } catch {
+      setWithdrawAccountName('');
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  // Withdrawal — Paystack transfer to the resolved bank account.
   const handleWithdrawSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setWithdrawError('');
 
     const amt = parseFloat(withdrawAmount);
-    if (isNaN(amt) || amt <= 0) {
-      setWithdrawError('Please specify a valid withdrawal amount.');
+    if (isNaN(amt) || amt <= 0) { setWithdrawError('Please specify a valid withdrawal amount.'); return; }
+    if (profile.balance < amt) { setWithdrawError('Insufficient ledger balance.'); return; }
+    if (withdrawAccount.replace(/\D/g, '').length !== 10 || !withdrawAccountName) {
+      setWithdrawError('Enter a valid 10-digit account number to resolve the account name.');
       return;
     }
-
-    if (profile.balance < amt) {
-      setWithdrawError('Insufficient ledger balance.');
-      return;
-    }
-
-    if (!withdrawPin) {
-      setWithdrawError('Security Transaction PIN is required.');
-      return;
-    }
+    if (!withdrawPin) { setWithdrawError('Security Transaction PIN is required.'); return; }
 
     setWithdrawStatus('processing');
-    await new Promise(r => setTimeout(r, 2000)); // Simulate anti-fraud risk check
+    await new Promise(r => setTimeout(r, 1800)); // simulate Paystack transfer queueing
 
+    const last4 = withdrawAccount.replace(/\D/g, '').slice(-4);
     try {
       const response = await fetch(apiUrl(`/api/profile/withdraw`), {
         method: 'POST',
@@ -177,8 +199,10 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
         body: JSON.stringify({
           email: profile.email,
           amount: amt,
-          method: withdrawMethod,
-          targetAccount: withdrawAccount,
+          method: `Paystack • ${withdrawBank} ••${last4}`,
+          bank: withdrawBank,
+          accountNumber: withdrawAccount.replace(/\D/g, ''),
+          accountName: withdrawAccountName,
           pin: withdrawPin,
         }),
       });
@@ -192,13 +216,13 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
         onRefreshProfile();
         setTimeout(() => {
           setWithdrawStatus('idle');
-          setWithdrawAmount('50');
+          setWithdrawAmount('2000');
           setWithdrawPin('');
         }, 3000);
       }
     } catch (e) {
       setWithdrawStatus('idle');
-      setWithdrawError('Failed to route payout to bank network.');
+      setWithdrawError('Failed to route payout to the bank network.');
     }
   };
 
@@ -237,7 +261,18 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 w-full max-w-6xl mx-auto p-2" id="finance_portal_main">
-      
+
+      {/* Simulated Paystack checkout popup (deposit) */}
+      {paystackRef && (
+        <PaystackCheckout
+          email={profile.email}
+          amount={parseFloat(depositAmount) || 0}
+          reference={paystackRef}
+          onVerify={verifyPaystack}
+          onDone={closePaystack}
+        />
+      )}
+
       {/* CASHIER TERMINAL CARD */}
       <div className="lg:col-span-7 bg-dark-card border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col">
         {/* TAB BUTTONS */}
@@ -434,25 +469,24 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
             </AnimatePresence>
           )}
 
-          {/* 1. DEPOSIT PORTAL */}
+          {/* 1. DEPOSIT PORTAL — Paystack checkout */}
           {activeTab === 'deposit' && (
             <AnimatePresence mode="wait">
-              {depositStatus === 'idle' ? (
-                <motion.form
-                  key="deposit-form"
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  onSubmit={handleDepositSubmit}
-                  className="space-y-4"
-                >
+              {depositStatus === 'completed' ? (
+                <motion.div key="deposit-done" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center py-12 space-y-3">
+                  <CheckCircle2 className="w-14 h-14 text-neon-green mx-auto animate-bounce" />
+                  <h3 className="text-lg font-bold font-display text-neon-green neon-glow-green">Deposit settled!</h3>
+                  <p className="text-xs text-slate-400 font-mono">Your Paystack payment cleared — your wallet balance is updated.</p>
+                </motion.div>
+              ) : (
+                <motion.form key="deposit-form" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} onSubmit={handleDepositSubmit} className="space-y-4">
                   <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-800/80 mb-4">
                     <span className="text-[10px] font-mono text-slate-500 block uppercase">Current Wallet Balance</span>
                     <span className="text-3xl font-bold font-display text-white">{formatNaira(profile.balance)}</span>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-mono text-slate-400 mb-2">Deposit Sum (₦)</label>
+                    <label className="block text-xs font-mono text-slate-400 mb-2">Amount to Fund (₦)</label>
                     <div className="relative">
                       <span className="absolute left-3.5 top-1/2 -translate-y-1/2 font-display text-slate-400 font-bold">₦</span>
                       <input
@@ -460,99 +494,34 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                         value={depositAmount}
                         onChange={(e) => setDepositAmount(e.target.value)}
                         placeholder="5000"
+                        min="100"
                         className="w-full bg-slate-900/80 border border-slate-800 rounded-lg py-2.5 pl-8 pr-4 font-mono text-sm text-white focus:outline-none focus:border-neon-green/60"
                         required
-                        min="1"
                       />
                     </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-mono text-slate-400 mb-2">Secure Method</label>
-                    <div className="grid grid-cols-2 gap-4">
-                      <button
-                        type="button"
-                        onClick={() => setDepositMethod('card')}
-                        className={`py-3 rounded-lg border font-mono text-xs font-semibold flex flex-col items-center gap-1.5 transition-all ${
-                          depositMethod === 'card'
-                            ? 'border-neon-green bg-neon-green/5 text-white'
-                            : 'border-slate-800 bg-slate-900/30 text-slate-400 hover:text-white hover:border-slate-700'
-                        }`}
-                      >
-                        <CreditCard className="w-5 h-5 text-neon-green" />
-                        Visa / Mastercard
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setDepositMethod('crypto')}
-                        className={`py-3 rounded-lg border font-mono text-xs font-semibold flex flex-col items-center gap-1.5 transition-all ${
-                          depositMethod === 'crypto'
-                            ? 'border-neon-green bg-neon-green/5 text-white'
-                            : 'border-slate-800 bg-slate-900/30 text-slate-400 hover:text-white hover:border-slate-700'
-                        }`}
-                      >
-                        <Wallet className="w-5 h-5 text-neon-green" />
-                        Bitcoin Wallet
-                      </button>
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {[1000, 2000, 5000, 10000].map(v => (
+                        <button
+                          key={v}
+                          type="button"
+                          onClick={() => setDepositAmount(String(v))}
+                          className={`px-2.5 py-1 rounded-md font-mono text-[10px] font-bold border transition-all ${depositAmount === String(v) ? 'border-neon-green bg-neon-green/10 text-neon-green' : 'border-slate-800 bg-slate-900/50 text-slate-400 hover:text-white'}`}
+                        >{formatNaira(v)}</button>
+                      ))}
                     </div>
                   </div>
 
-                  {depositMethod === 'card' ? (
-                    <div className="space-y-3 pt-2">
-                      <div>
-                        <label className="block text-[10px] font-mono text-slate-500 mb-1">Card number</label>
-                        <input
-                          type="text"
-                          value={cardNumber}
-                          onChange={(e) => setCardNumber(e.target.value)}
-                          className="w-full bg-slate-900/80 border border-slate-800 rounded-lg py-2 px-3 font-mono text-xs text-white focus:outline-none focus:border-neon-green/60"
-                        />
-                      </div>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-[10px] font-mono text-slate-500 mb-1">Expiry Date</label>
-                          <input
-                            type="text"
-                            value={cardExpiry}
-                            onChange={(e) => setCardExpiry(e.target.value)}
-                            placeholder="MM/YY"
-                            className="w-full bg-slate-900/80 border border-slate-800 rounded-lg py-2 px-3 font-mono text-xs text-white focus:outline-none"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] font-mono text-slate-500 mb-1">CVC Code</label>
-                          <input
-                            type="password"
-                            value={cardCVC}
-                            onChange={(e) => setCardCVC(e.target.value)}
-                            placeholder="***"
-                            maxLength={3}
-                            className="w-full bg-slate-900/80 border border-slate-800 rounded-lg py-2 px-3 font-mono text-xs text-white focus:outline-none"
-                          />
-                        </div>
-                      </div>
+                  {/* Paystack method preview */}
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-3 flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: '#0BA4DB' }}>
+                      <span className="font-bold text-sm" style={{ color: '#fff' }}>P</span>
                     </div>
-                  ) : (
-                    <div className="space-y-3 pt-2">
-                      <div>
-                        <label className="block text-[10px] font-mono text-slate-500 mb-1">Send to our Secure BTC Address</label>
-                        <div className="flex bg-slate-950 p-2.5 rounded-lg border border-slate-800 font-mono text-[11px] text-slate-300 items-center justify-between">
-                          <span className="truncate mr-2">{cryptoAddress}</span>
-                          <button
-                            type="button"
-                            onClick={() => handleCopyHash(cryptoAddress)}
-                            className="text-neon-green p-1 hover:bg-slate-900 rounded"
-                          >
-                            <Copy className="w-4 h-4" />
-                          </button>
-                        </div>
-                        <p className="text-[10px] text-slate-500 font-mono mt-1">
-                          Deposits will instantly authorize upon transaction broadcast.
-                        </p>
-                      </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-semibold text-white">Pay with Paystack</div>
+                      <div className="text-[10px] font-mono text-slate-500">Card · Bank Transfer · USSD</div>
                     </div>
-                  )}
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0" style={{ background: '#fff4e5', color: '#b26a00' }}>TEST</span>
+                  </div>
 
                   {depositError && (
                     <div className="p-3 bg-red-950/40 border border-red-500/30 rounded-lg text-xs text-red-400 font-mono flex items-center gap-2">
@@ -563,61 +532,14 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
 
                   <button
                     type="submit"
-                    className="w-full py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-[#050505] font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(0,255,102,0.3)] mt-6"
+                    disabled={initializing}
+                    className="w-full py-3 rounded-lg font-bold text-sm cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-60 flex items-center justify-center gap-2"
+                    style={{ background: '#0BA4DB', color: '#fff' }}
                   >
-                    Authorize Simulated Deposit
+                    {initializing ? (<><Loader2 className="w-4 h-4 animate-spin" /> Starting Paystack…</>) : (<>Pay {formatNaira(parseFloat(depositAmount) || 0)} with Paystack</>)}
                   </button>
+                  <p className="text-[9px] text-slate-600 font-mono text-center">Simulated Paystack checkout · no real charge is made.</p>
                 </motion.form>
-              ) : (
-                // GATEWAY PROCESSING STEPPERS
-                <motion.div
-                  key="deposit-processing"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  className="flex flex-col items-center justify-center py-10 space-y-6"
-                >
-                  {depositStatus !== 'completed' && depositStatus !== 'failed' ? (
-                    <div className="text-center space-y-4">
-                      <Loader2 className="w-12 h-12 text-neon-green animate-spin mx-auto" />
-                      <h3 className="text-sm font-semibold font-display text-white">Payment Gateway Handshake</h3>
-                      
-                      <div className="space-y-2 max-w-[280px] mx-auto text-left font-mono text-xs text-slate-500">
-                        <div className="flex items-center gap-2">
-                          <div className={`w-2 h-2 rounded-full ${depositStatus === 'connecting' ? 'bg-neon-green animate-ping' : 'bg-slate-800'}`} />
-                          <span className={depositStatus === 'connecting' ? 'text-white' : ''}>1. Connecting to Secure Gateway</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className={`w-2 h-2 rounded-full ${depositStatus === 'authorizing' ? 'bg-neon-green animate-ping' : 'bg-slate-800'}`} />
-                          <span className={depositStatus === 'authorizing' ? 'text-white' : ''}>2. Acquiring Bank Authorization</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className={`w-2 h-2 rounded-full ${depositStatus === 'signing' ? 'bg-neon-green animate-ping' : 'bg-slate-800'}`} />
-                          <span className={depositStatus === 'signing' ? 'text-white' : ''}>3. Appending Ledger Signatures</span>
-                        </div>
-                      </div>
-                    </div>
-                  ) : depositStatus === 'completed' ? (
-                    <div className="text-center space-y-3">
-                      <CheckCircle2 className="w-14 h-14 text-neon-green mx-auto animate-bounce" />
-                      <h3 className="text-lg font-bold font-display text-neon-green neon-glow-green">Deposit settled!</h3>
-                      <p className="text-xs text-slate-400 font-mono">
-                        Wallet updated with +{formatNaira(parseFloat(depositAmount) || 0)}. Transaction signed and sealed.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="text-center space-y-3">
-                      <AlertCircle className="w-14 h-14 text-red-500 mx-auto" />
-                      <h3 className="text-lg font-bold font-display text-red-500">Deposit Failed</h3>
-                      <p className="text-xs text-slate-400 font-mono">{depositError}</p>
-                      <button
-                        onClick={() => setDepositStatus('idle')}
-                        className="px-4 py-2 bg-slate-900 border border-slate-800 text-xs text-white rounded font-mono"
-                      >
-                        Try Again
-                      </button>
-                    </div>
-                  )}
-                </motion.div>
               )}
             </AnimatePresence>
           )}
@@ -677,31 +599,49 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
+                  {/* Paystack transfer — bank + account, auto-resolves the name */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-xs font-mono text-slate-400 mb-2">Payout Method</label>
+                      <label className="block text-xs font-mono text-slate-400 mb-2">Bank</label>
                       <select
-                        value={withdrawMethod}
-                        onChange={(e) => setWithdrawMethod(e.target.value)}
+                        value={withdrawBank}
+                        onChange={(e) => { setWithdrawBank(e.target.value); if (withdrawAccount.replace(/\D/g, '').length === 10) resolveAccount(withdrawAccount, e.target.value); }}
                         className="w-full bg-slate-900 border border-slate-800 rounded-lg py-2.5 px-3 font-mono text-xs text-white focus:outline-none"
                       >
-                        <option value="Bank Transfer">Bank Wire (SEPA/ACH)</option>
-                        <option value="PayPal">PayPal Balance</option>
-                        <option value="Bitcoin wallet">BTC Wallet</option>
+                        {NG_BANKS.map(b => <option key={b} value={b}>{b}</option>)}
                       </select>
                     </div>
 
                     <div>
-                      <label className="block text-xs font-mono text-slate-400 mb-2">Target Account/Wallet</label>
+                      <label className="block text-xs font-mono text-slate-400 mb-2">Account Number (10 digits)</label>
                       <input
                         type="text"
+                        inputMode="numeric"
+                        maxLength={10}
                         value={withdrawAccount}
-                        onChange={(e) => setWithdrawAccount(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg py-2.5 px-3 font-mono text-xs text-white focus:outline-none"
+                        onChange={(e) => {
+                          const v = e.target.value.replace(/\D/g, '').slice(0, 10);
+                          setWithdrawAccount(v);
+                          setWithdrawAccountName('');
+                          if (v.length === 10) resolveAccount(v, withdrawBank);
+                        }}
+                        placeholder="0123456789"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg py-2.5 px-3 font-mono text-xs text-white focus:outline-none focus:border-neon-cyan/60"
                         required
                       />
                     </div>
                   </div>
+
+                  {/* Resolved account name */}
+                  {(resolving || withdrawAccountName) && (
+                    <div className="flex items-center gap-2 text-xs font-mono px-1">
+                      {resolving ? (
+                        <><Loader2 className="w-3.5 h-3.5 animate-spin text-slate-400" /> <span className="text-slate-400">Resolving account…</span></>
+                      ) : (
+                        <><CheckCircle2 className="w-3.5 h-3.5 text-neon-green" /> <span className="text-neon-green font-bold uppercase">{withdrawAccountName}</span></>
+                      )}
+                    </div>
+                  )}
 
                   <div>
                     <label className="block text-xs font-mono text-slate-400 mb-2">Security Transaction PIN</label>
@@ -731,10 +671,13 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
 
                   <button
                     type="submit"
-                    className="w-full py-2.5 rounded-lg bg-neon-cyan hover:bg-neon-cyan/90 text-[#050505] font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(0,243,255,0.3)] mt-6"
+                    disabled={resolving || !withdrawAccountName}
+                    className="w-full py-3 rounded-lg font-bold text-sm cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-2"
+                    style={{ background: '#0BA4DB', color: '#fff' }}
                   >
-                    Confirm Payout Routing
+                    <Landmark className="w-4 h-4" /> Withdraw {formatNaira(parseFloat(withdrawAmount) || 0)} to bank
                   </button>
+                  <p className="text-[9px] text-slate-600 font-mono text-center">Simulated Paystack transfer · no real money moves.</p>
                 </motion.form>
               ) : withdrawStatus === 'processing' ? (
                 <motion.div
@@ -743,10 +686,10 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                   animate={{ opacity: 1 }}
                   className="flex flex-col items-center justify-center py-12 space-y-4"
                 >
-                  <Loader2 className="w-12 h-12 text-neon-cyan animate-spin" />
-                  <h3 className="text-sm font-semibold font-display text-white">Running Fraud Risk Auditing...</h3>
+                  <Loader2 className="w-12 h-12 animate-spin" style={{ color: '#0BA4DB' }} />
+                  <h3 className="text-sm font-semibold font-display text-white">Queuing Paystack transfer…</h3>
                   <p className="text-[10px] text-slate-500 font-mono text-center max-w-[280px]">
-                    Verifying KYC, verifying anti-cheat balance matching, and broadcasting payout block.
+                    Debiting your wallet and routing the payout to {withdrawBank}.
                   </p>
                 </motion.div>
               ) : (
@@ -757,9 +700,9 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                   className="text-center py-12 space-y-3"
                 >
                   <CheckCircle2 className="w-14 h-14 text-neon-cyan mx-auto animate-bounce" />
-                  <h3 className="text-lg font-bold font-display text-neon-cyan neon-glow-cyan">Payout Authorized!</h3>
+                  <h3 className="text-lg font-bold font-display text-neon-cyan neon-glow-cyan">Transfer sent!</h3>
                   <p className="text-xs text-slate-400 font-mono max-w-[320px] mx-auto">
-                    Successfully debited -{formatNaira(parseFloat(withdrawAmount) || 0)}. Funds routed to your target account.
+                    Debited -{formatNaira(parseFloat(withdrawAmount) || 0)} — Paystack is sending it to {withdrawAccountName} ({withdrawBank}).
                   </p>
                 </motion.div>
               )}
