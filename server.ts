@@ -1824,6 +1824,35 @@ app.get('/api/tournament/table', (req, res) => {
   const room = gameRooms[roomId];
   const top = room.discardPile[room.discardPile.length - 1] || null;
   const winner = room.winnerPlayerId ? room.players.find(p => p.id === room.winnerPlayerId) : null;
+
+  // A full, spectator-SAFE GameState the client can render with the real
+  // GameBoard — so watching looks exactly like playing. Hidden info is stripped:
+  // player hands are emptied (opponents render face-down from cardsCount) and the
+  // draw pile order is never sent (only its count). The discard pile is public.
+  const specState = {
+    roomId: room.roomId,
+    status: room.status,
+    players: room.players.map(p => ({
+      ...p,
+      isBot: false,              // never reveal bots, same as broadcastRoomState
+      hand: [],                  // hide hands from spectators
+      predestined: p.id === (tournament?.forcedWinnerId || null),
+    })),
+    pot: room.pot,
+    activePlayerIndex: room.activePlayerIndex,
+    logs: room.logs.slice(-40),
+    turnTimeLeft: room.turnTimeLeft,
+    winnerPlayerId: room.winnerPlayerId,
+    potWinnerId: room.potWinnerId,
+    antiCheatLog: [],
+    sponsorName: room.sponsorName,
+    sponsorPrize: room.sponsorPrize,
+    drawPileCount: room.drawPileCount,
+    discardPile: room.discardPile,
+    requestedSuit: room.requestedSuit,
+    turnDirection: room.turnDirection,
+  };
+
   res.json({
     exists: true,
     roomId,
@@ -1840,6 +1869,7 @@ app.get('/api/tournament/table', (req, res) => {
       predestined: p.id === (tournament?.forcedWinnerId || null),
     })),
     logs: room.logs.slice(-30).map(l => ({ message: l.message, type: l.type, timestamp: l.timestamp })),
+    state: specState,
   });
 });
 

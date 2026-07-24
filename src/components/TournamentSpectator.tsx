@@ -1,9 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Eye, Crown, Users, X, Loader2, ArrowLeft, Trophy } from 'lucide-react';
 import { apiUrl } from '../config.js';
-
-const SUIT: Record<string, string> = { circle: '●', triangle: '▲', cross: '➕', square: '■', star: '★', whot: '🃏' };
-const DOT: Record<string, string> = { red: 'bg-neon-pink', green: 'bg-neon-green', yellow: 'bg-amber-400', blue: 'bg-neon-cyan' };
+import { GameState, UserProfile, PublicConfig } from '../types.js';
+import GameBoard from './GameBoard.tsx';
 
 interface SpecTable { roomId: string; players: string[]; winner: string; done: boolean; }
 interface SpecRound { index: number; byes: string[]; tables: SpecTable[]; }
@@ -17,7 +16,7 @@ interface Spectate {
   rounds?: SpecRound[];
 }
 
-export default function TournamentSpectator({ email, onClose }: { email: string; onClose: () => void }) {
+export default function TournamentSpectator({ email, onClose, profile, config }: { email: string; onClose: () => void; profile: UserProfile | null; config: PublicConfig | null }) {
   const [spec, setSpec] = useState<Spectate | null>(null);
   const [watch, setWatch] = useState<{ roomId: string; label: string } | null>(null);
 
@@ -94,7 +93,7 @@ export default function TournamentSpectator({ email, onClose }: { email: string;
         </div>
       )}
 
-      {watch && <WatchTable email={email} roomId={watch.roomId} label={watch.label} forcedName={forced} onClose={() => setWatch(null)} />}
+      {watch && <WatchTable email={email} roomId={watch.roomId} label={watch.label} forcedName={forced} profile={profile} config={config} onClose={() => setWatch(null)} />}
     </div>
   );
 }
@@ -102,17 +101,16 @@ export default function TournamentSpectator({ email, onClose }: { email: string;
 interface TableSnap {
   exists: boolean;
   status?: string;
-  topCard?: { suit: string; value: number } | null;
-  requestedSuit?: string | null;
-  drawPileCount?: number;
   winnerName?: string | null;
-  players?: { name: string; color: string | null; cardsCount: number; active: boolean; predestined?: boolean }[];
-  logs?: { message: string; type: string; timestamp: string }[];
+  state?: GameState | null;
 }
 
-function WatchTable({ email, roomId, label, forcedName, onClose }: { email: string; roomId: string; label: string; forcedName: string | null; onClose: () => void }) {
+// Watch a live table the SAME way it looks when you're playing: the real
+// GameBoard, driven by a spectator-safe full state polled from the server
+// (hands hidden — you see the board, seats, top card, market and the live play,
+// but not anyone's cards). Read-only: with no seat there are no play controls.
+function WatchTable({ email, roomId, label, profile, config, onClose }: { email: string; roomId: string; label: string; forcedName: string | null; profile: UserProfile | null; config: PublicConfig | null; onClose: () => void }) {
   const [snap, setSnap] = useState<TableSnap | null>(null);
-  const logRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     let alive = true;
     const poll = async () => {
@@ -125,55 +123,40 @@ function WatchTable({ email, roomId, label, forcedName, onClose }: { email: stri
     const id = window.setInterval(poll, 900);
     return () => { alive = false; window.clearInterval(id); };
   }, [email, roomId]);
-  useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [snap]);
 
-  const top = snap?.topCard;
-  const suit = top ? (top.value === 20 ? '🃏' : SUIT[top.suit] ?? top.suit) : '—';
+  const noop = () => {};
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 backdrop-blur-sm p-3" onClick={onClose}>
-      <div className="w-full max-w-lg bg-dark-card border border-neon-cyan/30 rounded-2xl p-4 shadow-2xl relative" onClick={(e) => e.stopPropagation()}>
-        <button onClick={onClose} className="absolute top-3 right-3 text-slate-500 hover:text-white cursor-pointer"><X className="w-5 h-5" /></button>
-        <h3 className="text-sm font-bold font-display text-white flex items-center gap-2 mb-3">
-          <Eye className="w-4 h-4 text-neon-cyan" /> {label}
-          {snap?.status === 'playing' && <span className="text-[9px] font-mono text-amber-400 animate-pulse">● LIVE</span>}
-        </h3>
+    <div className="fixed inset-0 z-[100] flex items-start justify-center bg-black/80 backdrop-blur-sm p-2 sm:p-4 overflow-y-auto" onClick={onClose}>
+      <div className="w-full max-w-5xl my-4 bg-dark-card border border-neon-cyan/30 rounded-2xl p-3 sm:p-4 shadow-2xl relative" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-bold font-display text-white flex items-center gap-2">
+            <Eye className="w-4 h-4 text-neon-cyan" /> {label}
+            {snap?.status === 'playing' && <span className="text-[9px] font-mono text-amber-400 animate-pulse">● LIVE</span>}
+            <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest border border-slate-700 rounded px-1.5 py-0.5">Spectating</span>
+          </h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-white cursor-pointer inline-flex items-center gap-1 text-xs font-mono">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
         {!snap?.exists ? (
-          <div className="py-10 text-center font-mono text-xs text-slate-500"><Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" /> Loading…</div>
+          <div className="py-16 text-center font-mono text-xs text-slate-500"><Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" /> Loading table…</div>
+        ) : snap.state ? (
+          // Read-only: no seat → GameBoard renders the table from the outside with
+          // no play controls. Handlers are no-ops (the server also rejects actions
+          // from anyone not seated at the table).
+          <GameBoard
+            gameState={snap.state}
+            profile={profile}
+            config={config}
+            activePlayerEmail={email}
+            onRollDice={noop}
+            onMoveToken={noop}
+            onAddBots={noop}
+            onGoToCashier={noop}
+          />
         ) : (
-          <>
-            <div className="flex items-center justify-center gap-6 mb-4">
-              <div className="text-center">
-                <div className={`w-16 rounded-lg border-2 flex flex-col items-center justify-center font-display ${top?.value === 20 ? 'border-neon-purple bg-neon-purple/10' : 'border-slate-600 bg-slate-900'}`} style={{ height: '5.5rem' }}>
-                  <span className="text-2xl leading-none">{suit}</span>
-                  <span className="text-lg font-bold text-white">{top ? (top.value === 20 ? 'W' : top.value) : ''}</span>
-                </div>
-                <span className="text-[9px] font-mono text-slate-500 mt-1 block">top card</span>
-              </div>
-              <div className="text-center">
-                <div className="w-16 rounded-lg border-2 border-dashed border-slate-700 bg-slate-900/50 flex items-center justify-center text-slate-400 font-display font-bold text-lg" style={{ height: '5.5rem' }}>{snap.drawPileCount ?? 0}</div>
-                <span className="text-[9px] font-mono text-slate-500 mt-1 block">market</span>
-              </div>
-            </div>
-            {snap.requestedSuit && <p className="text-center text-[10px] font-mono text-neon-purple mb-3">Requested: {SUIT[snap.requestedSuit] ?? snap.requestedSuit} {snap.requestedSuit}</p>}
-            <div className="grid grid-cols-2 gap-2 mb-3">
-              {snap.players?.map((p, i) => (
-                <div key={i} className={`flex items-center justify-between rounded-lg border px-2.5 py-1.5 ${p.active ? 'border-neon-cyan bg-neon-cyan/10' : snap.winnerName === p.name ? 'border-neon-green/40 bg-neon-green/5' : 'border-slate-800 bg-slate-900/40'}`}>
-                  <span className="flex items-center gap-1.5 min-w-0">
-                    <span className={`w-2 h-2 rounded-full flex-shrink-0 ${DOT[p.color ?? ''] ?? 'bg-slate-600'}`} />
-                    <span className={`text-[11px] font-mono truncate ${forcedName && p.name === forcedName ? 'text-amber-300 font-bold' : p.active ? 'text-white font-bold' : 'text-slate-300'}`}>{p.name}</span>
-                    {forcedName && p.name === forcedName && <Crown className="w-3 h-3 text-amber-400 flex-shrink-0" />}
-                  </span>
-                  <span className="text-[11px] font-mono font-bold text-slate-400 flex-shrink-0">{p.cardsCount}🂠</span>
-                </div>
-              ))}
-            </div>
-            <div ref={logRef} className="h-36 overflow-y-auto bg-slate-950 border border-slate-800 rounded-lg p-2 space-y-1">
-              {(snap.logs ?? []).map((l, i) => (
-                <div key={i} className={`text-[10px] font-mono leading-snug ${l.type === 'win' ? 'text-neon-green' : l.type === 'move' ? 'text-slate-200' : l.type === 'roll' ? 'text-neon-cyan' : l.type === 'system' ? 'text-amber-300' : 'text-slate-500'}`}>{l.message}</div>
-              ))}
-            </div>
-          </>
+          <div className="py-16 text-center font-mono text-xs text-slate-500">This table has finished.</div>
         )}
       </div>
     </div>

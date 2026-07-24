@@ -799,7 +799,7 @@ export default function App() {
                 {/* 1. COMPONENT DISPATCHER */}
                 {activeTab === 'board' && (
                   spectating ? (
-                    <TournamentSpectator email={email} onClose={() => setSpectating(false)} />
+                    <TournamentSpectator email={email} onClose={() => setSpectating(false)} profile={profile} config={config} />
                   ) : (mode === 'all-hands' && (allHandsResult || !(gameState && gameState.status === 'playing'))) ? (
                     <AllHandsScreen
                       gameState={gameState}
