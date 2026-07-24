@@ -14,6 +14,7 @@ interface GameBoardProps {
   onMoveToken: (tokenId: number) => void; // Plays card
   onAddBots: () => void;
   onGoToCashier: () => void;
+  spectator?: boolean; // watching, not seated — hide the "your hand" self panel
 }
 
 export default function GameBoard({
@@ -25,6 +26,7 @@ export default function GameBoard({
   onMoveToken,
   onAddBots,
   onGoToCashier,
+  spectator,
 }: GameBoardProps) {
   // Ticket price + arena name from admin config (fall back to defaults).
   const unitPrice = config?.ticketPrice ?? TICKET_PRICE;
@@ -36,6 +38,9 @@ export default function GameBoard({
   const myPlayer = gameState.players.find(p => p.id === activePlayerEmail);
   const myColor = myPlayer?.color;
   const isMyTurn = gameState.players[gameState.activePlayerIndex]?.id === activePlayerEmail;
+  // A spectator has no seat: someone watching a table, or a player who's been
+  // knocked out. We render the table but never a "your hand" panel for them.
+  const isSpectator = !!spectator || !myPlayer;
 
   // Show suit selection modal/popup when a human plays a Whot (20) wildcard
   const [showSuitDeclaration, setShowSuitDeclaration] = React.useState(false);
@@ -720,7 +725,15 @@ export default function GameBoard({
               </AnimatePresence>
             </div>
 
-            {/* 3. HUMAN PLAYER HAND LAYOUT CONTAINER (YOU) */}
+            {/* 3. HUMAN PLAYER HAND LAYOUT CONTAINER (YOU) — spectators get a
+                clean "watching" strip instead of a phantom empty seat. */}
+            {isSpectator ? (
+              <div className="mt-6 sm:mt-8 relative z-10">
+                <div className="py-4 px-4 bg-slate-950/60 rounded-2xl border border-slate-800 text-center font-mono flex items-center justify-center gap-2">
+                  <span className="text-xs text-slate-300">👁 Spectating — you're out of this game. Watching {gameState.players.length} player{gameState.players.length !== 1 ? 's' : ''} play it out.</span>
+                </div>
+              </div>
+            ) : (
             <div className="mt-6 sm:mt-8 relative z-10" id="human_deck_fan_portal">
               <div className="flex items-center justify-between mb-4 border-b border-slate-900 pb-2">
                 <span className="text-[10px] uppercase font-mono text-slate-400 tracking-wider">Your Hand ({myPlayer?.hand.length || 0} cards)</span>
@@ -793,6 +806,7 @@ export default function GameBoard({
                 </div>
               )}
             </div>
+            )}
 
             {/* 4. WILDCARD DECLARATION POPUP MODAL */}
             <AnimatePresence>

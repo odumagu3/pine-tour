@@ -10,6 +10,7 @@ import AdminDashboard from './components/AdminDashboard.tsx';
 import TournamentScreen from './components/TournamentScreen.tsx';
 import TournamentSpectator from './components/TournamentSpectator.tsx';
 import AllHandsScreen from './components/AllHandsScreen.tsx';
+import AllHandsShowdown, { ShowdownData } from './components/AllHandsShowdown.tsx';
 import AuthGate from './components/AuthGate.tsx';
 import InstallButton from './components/InstallButton.tsx';
 import { InAppNotifications } from './components/InAppNotifications.tsx';
@@ -106,6 +107,7 @@ export default function App() {
   const [allHandsStarting, setAllHandsStarting] = useState(false);
   const [allHandsEliminated, setAllHandsEliminated] = useState(false);
   const [allHandsResult, setAllHandsResult] = useState<{ youWon: boolean; winnerName: string; prize: number } | null>(null);
+  const [allHandsShowdown, setAllHandsShowdown] = useState<ShowdownData | null>(null);
   const setPlayMode = (m: 'tournament' | 'all-hands') => { modeRef.current = m; setMode(m); };
 
   // Send the register message over the live socket (used from the Join panel).
@@ -231,9 +233,15 @@ export default function App() {
         // --- All Hands on Deck events ---
         case 'all-hands-showdown': {
           setAllHandsStarting(false);
-          const msg = `⚔️ Showdown! ${data.eliminatedName} is out (highest total ${data.maxSum}). ${data.remaining} left.`;
-          setGameplayNotice(msg);
-          setTimeout(() => setGameplayNotice((prev) => (prev === msg ? null : prev)), 5000);
+          // Trigger the animated reveal: every hand's total counts up, then the
+          // highest is knocked out. nonce re-runs the animation each showdown.
+          setAllHandsShowdown({
+            totals: data.totals || [],
+            eliminatedName: data.eliminatedName,
+            maxSum: data.maxSum,
+            remaining: data.remaining,
+            nonce: Date.now(),
+          });
           break;
         }
         case 'all-hands-eliminated':
@@ -437,6 +445,7 @@ export default function App() {
     setPlayMode('tournament');
     setAllHandsEliminated(false);
     setAllHandsResult(null);
+    setAllHandsShowdown(null);
     wantEnterAllHandsRef.current = false;
     await supabase.auth.signOut();
   };
@@ -466,6 +475,7 @@ export default function App() {
     setPlayMode('all-hands');
     setAllHandsEliminated(false);
     setAllHandsResult(null);
+    setAllHandsShowdown(null);
     setAllHandsStarting(false);
     setGameState(null);
     wantEnterAllHandsRef.current = true;
@@ -486,6 +496,7 @@ export default function App() {
   const handleAllHandsPlayAgain = () => {
     setAllHandsEliminated(false);
     setAllHandsResult(null);
+    setAllHandsShowdown(null);
     setGameState(null);
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({ type: 'enter-all-hands' }));
@@ -671,6 +682,11 @@ export default function App() {
       ) : (
         // ACTIVE PLAYING ARENA
         <div className="flex-1 flex flex-col relative">
+          {/* ALL HANDS ON DECK — animated card-count showdown reveal */}
+          {mode === 'all-hands' && allHandsShowdown && (
+            <AllHandsShowdown data={allHandsShowdown} onDone={() => setAllHandsShowdown(null)} />
+          )}
+
           {/* FLOATING GAMEPLAY NOTICES */}
           <AnimatePresence>
             {gameplayNotice && (
@@ -850,6 +866,7 @@ export default function App() {
                       onMoveToken={handleMoveToken}
                       onAddBots={handleAddBots}
                       onGoToCashier={() => setActiveTab('cashier')}
+                      spectator={mode === 'all-hands' && allHandsEliminated}
                     />
 
                     {/* BOTTOM SPLIT CHAT AND SECURE VERIFIED LOGS */}
