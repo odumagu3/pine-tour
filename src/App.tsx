@@ -14,7 +14,7 @@ import AllHandsShowdown, { ShowdownData } from './components/AllHandsShowdown.ts
 import AuthGate from './components/AuthGate.tsx';
 import InstallButton from './components/InstallButton.tsx';
 import { InAppNotifications } from './components/InAppNotifications.tsx';
-import { ShieldCheck, MessageSquare, Send, Bell, User, LayoutDashboard, Wallet, Database, Lock, AlertCircle, HelpCircle, Ticket, LogOut, Settings } from 'lucide-react';
+import { ShieldCheck, MessageSquare, Send, Bell, User, LayoutDashboard, Wallet, Database, Lock, AlertCircle, HelpCircle, Ticket, LogOut, Settings, Sun, Moon } from 'lucide-react';
 import { formatNaira } from './currency.js';
 import { supabase } from './supabaseClient.js';
 import { apiUrl, wsUrl } from './config.js';
@@ -39,6 +39,18 @@ function savePrefs(p: LobbyPrefs) {
 
 export default function App() {
   const [prefs] = useState(loadPrefs);
+
+  // Light / dark theme. Defaults to the device setting, remembers the choice.
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('pine_theme') : null;
+    if (saved === 'light' || saved === 'dark') return saved;
+    return typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  });
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem('pine_theme', theme); } catch { /* ignore */ }
+  }, [theme]);
+  const toggleTheme = () => setTheme(t => (t === 'dark' ? 'light' : 'dark'));
 
   // Supabase auth session is the source of identity.
   const [session, setSession] = useState<Session | null>(null);
@@ -101,8 +113,9 @@ export default function App() {
   // All Hands on Deck — a separate survival segment (independent of the bracket).
   // `mode` decides which segment this session is playing; `modeRef` mirrors it so
   // the (non-memoized) socket callbacks read the current value on reconnect.
-  const [mode, setMode] = useState<'tournament' | 'all-hands'>('tournament');
-  const modeRef = useRef<'tournament' | 'all-hands'>('tournament');
+  // All Hands on Deck is the only game mode now (tournaments retired).
+  const [mode, setMode] = useState<'tournament' | 'all-hands'>('all-hands');
+  const modeRef = useRef<'tournament' | 'all-hands'>('all-hands');
   const wantEnterAllHandsRef = useRef(false);
   const [allHandsStarting, setAllHandsStarting] = useState(false);
   const [allHandsEliminated, setAllHandsEliminated] = useState(false);
@@ -406,34 +419,6 @@ export default function App() {
     return () => window.removeEventListener('scroll', onScroll);
   }, [isJoined, activeTab, gameState]);
 
-  const handleJoinRoom = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!email || !userName) return;
-    const isAdmin = !!config?.isAdmin;
-    const bracketOpen = !!bracketPublic?.open;
-
-    // Non-admins register for an open bracket (buy-in charged server-side).
-    if (bracketOpen && !isAdmin) {
-      savePrefs({ userName, roomId: config?.roomName || roomId });
-      wantRegisterRef.current = true;
-      setTourneyError('');
-      setRegistering(true);
-      setTourneyPhase('join');
-      setIsJoined(true);
-      connectWebSocket();
-      return;
-    }
-
-    // Only admins can enter otherwise — to reach the dashboard and run a
-    // bracket. There is no casual single-table game anymore (it locked players
-    // out at 4). Everyone else plays by registering for a bracket above.
-    if (!isAdmin) return;
-    savePrefs({ userName, roomId: config?.roomName || roomId });
-    setActiveTab('admin');
-    setIsJoined(true);
-    connectWebSocket();
-  };
-
   const handleSignOut = async () => {
     shouldReconnectRef.current = false;
     if (socketRef.current) socketRef.current.close();
@@ -564,49 +549,52 @@ export default function App() {
               <span className="text-[11px] font-mono text-slate-300 truncate">
                 <span className="text-slate-500">Signed in:</span> {email}
               </span>
-              <button
-                type="button"
-                onClick={handleSignOut}
-                className="text-[10px] font-mono text-slate-400 hover:text-neon-pink transition-colors flex-shrink-0 cursor-pointer"
-              >
-                Sign out
-              </button>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={toggleTheme}
+                  title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                  aria-label="Toggle light/dark mode"
+                  className="p-1 rounded-md border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition-all cursor-pointer"
+                >
+                  {theme === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSignOut}
+                  className="text-[10px] font-mono text-slate-400 hover:text-neon-pink transition-colors cursor-pointer"
+                >
+                  Sign out
+                </button>
+              </div>
             </div>
 
-            {/* Current tournament banner (admin-controlled) */}
-            {(bracketPublic?.exists || config?.tournamentActive) ? (
+            {/* All Hands on Deck banner — the game prize (admin-controlled) */}
+            {(config?.tournamentActive || config?.isAdmin) ? (
               <div className="mb-4 bg-gradient-to-br from-neon-green/10 to-slate-950 border border-neon-green/30 rounded-xl px-4 py-3">
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest block">
-                      {bracketPublic?.open ? 'Registration Open' : bracketPublic?.status === 'running' ? 'Tournament In Progress' : 'Live Tournament'}
-                    </span>
-                    <span className="text-sm font-bold font-display text-white truncate block">{bracketPublic?.sponsorName || config?.sponsorName}</span>
+                    <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest block">⚔️ All Hands on Deck · Survival</span>
+                    <span className="text-sm font-bold font-display text-white truncate block">{config?.sponsorName || 'Last player standing wins'}</span>
                   </div>
                   <div className="text-right flex-shrink-0">
                     <span className="text-[9px] font-mono text-slate-500 uppercase block">Cash Prize</span>
-                    <span className="text-lg font-black font-display text-neon-green neon-glow-green">{formatNaira(bracketPublic?.prize ?? config?.sponsorPrize ?? 0)}</span>
+                    <span className="text-lg font-black font-display text-neon-green neon-glow-green">{formatNaira(config?.sponsorPrize ?? 0)}</span>
                   </div>
                 </div>
-                {bracketPublic?.exists && (
-                  <div className="mt-2 pt-2 border-t border-slate-800 flex items-center gap-1.5 text-[10px] font-mono text-slate-400">
-                    <Ticket className="w-3 h-3 text-neon-purple" /> {bracketPublic.entrantCount ?? 0} registered · buy-in: 1 ticket (or your free game)
-                  </div>
-                )}
+                <div className="mt-2 pt-2 border-t border-slate-800 text-[10px] font-mono text-slate-400">
+                  No checkout win — when the deck runs dry, the highest hand is knocked out. Last one standing takes the prize.
+                </div>
               </div>
             ) : (
               <div className="mb-4 bg-slate-900/50 border border-dashed border-slate-700 rounded-xl px-4 py-5 text-center">
                 <AlertCircle className="w-6 h-6 text-slate-500 mx-auto mb-2" />
-                <p className="text-xs font-mono text-slate-300 font-bold">No tournaments available right now</p>
-                <p className="text-[10px] font-mono text-slate-500 mt-1">
-                  {config?.isAdmin
-                    ? 'Enter to open the Admin dashboard and announce the next tournament.'
-                    : 'Please check back soon — a new tournament will be announced here.'}
-                </p>
+                <p className="text-xs font-mono text-slate-300 font-bold">No game available right now</p>
+                <p className="text-[10px] font-mono text-slate-500 mt-1">Please check back soon.</p>
               </div>
             )}
 
-            <form onSubmit={handleJoinRoom} className="space-y-4">
+            <form onSubmit={(e) => { e.preventDefault(); handleEnterAllHands(); }} className="space-y-4">
               <div>
                 <label className="block text-xs font-mono text-slate-400 mb-1.5">Lobby Nickname</label>
                 <input
@@ -618,13 +606,6 @@ export default function App() {
                 />
               </div>
 
-              {config?.roomName && (
-                <div className="flex items-center justify-between bg-slate-900/40 border border-slate-800 rounded-lg px-3 py-2">
-                  <span className="text-[11px] font-mono text-slate-500">Arena</span>
-                  <span className="text-[11px] font-mono text-neon-cyan font-bold">{config.roomName}</span>
-                </div>
-              )}
-
               {connectionError && (
                 <div className="p-3 bg-red-950/40 border border-red-500/30 rounded-lg text-xs text-red-400 font-mono flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -634,40 +615,12 @@ export default function App() {
 
               <button
                 type="submit"
-                disabled={!(config?.isAdmin || bracketPublic?.open)}
-                className="w-full py-2.5 rounded-lg bg-neon-purple hover:bg-neon-purple/90 text-white font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(157,78,221,0.3)] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={!(config?.tournamentActive || config?.isAdmin)}
+                className="w-full py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-[#050505] font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(0,255,102,0.25)] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {config?.isAdmin
-                  ? 'Enter as Admin'
-                  : bracketPublic?.open
-                  ? 'Register for Tournament'
-                  : bracketPublic?.status === 'running'
-                  ? 'Tournament In Progress'
-                  : 'No Tournament Available'}
+                {(config?.tournamentActive || config?.isAdmin) ? '⚔️ Play All Hands on Deck' : 'No Game Available'}
               </button>
             </form>
-
-            {/* All Hands on Deck — a quick survival game vs AI (and anyone else
-                who joins), independent of the bracket. Available whenever a
-                sponsor + prize is configured. */}
-            {config?.tournamentActive && (
-              <div className="mt-4 pt-4 border-t border-dashed border-slate-800">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-[10px] font-mono uppercase tracking-widest text-neon-purple">⚔️ Or play now</span>
-                  <span className="text-[10px] font-mono text-slate-500">Survival · last standing wins</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleEnterAllHands}
-                  className="w-full py-2.5 rounded-lg bg-slate-900 border border-neon-green/40 hover:bg-neon-green/10 text-neon-green font-mono font-bold text-xs transition-all tracking-wider cursor-pointer"
-                >
-                  All Hands on Deck
-                </button>
-                <p className="text-[10px] font-mono text-slate-500 mt-1.5 text-center">
-                  No checkout win — when the deck runs dry, the highest hand is knocked out.
-                </p>
-              </div>
-            )}
 
             {/* Install as a mobile app (hidden once installed / standalone) */}
             <div className="mt-4">
@@ -793,9 +746,17 @@ export default function App() {
               </div>
               <button
                 onClick={() => setActiveTab('cashier')}
-                className="px-3 py-1.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-dark-bg font-mono font-bold text-xs shadow-[0_0_10px_rgba(0,255,102,0.2)] transition-all cursor-pointer"
+                className="px-3 py-1.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-[#050505] font-mono font-bold text-xs shadow-[0_0_10px_rgba(0,255,102,0.2)] transition-all cursor-pointer"
               >
                 + Fund
+              </button>
+              <button
+                onClick={toggleTheme}
+                title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                aria-label="Toggle light/dark mode"
+                className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:border-slate-700 transition-all cursor-pointer"
+              >
+                {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </button>
               <button
                 onClick={handleSignOut}

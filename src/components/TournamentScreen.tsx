@@ -81,7 +81,7 @@ export default function TournamentScreen({ phase, info, onGoToCashier, onWatch, 
               ) : (
                 <button
                   onClick={onGoToCashier}
-                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-dark-bg font-mono font-bold text-xs cursor-pointer"
+                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-[#050505] font-mono font-bold text-xs cursor-pointer"
                 >
                   <Wallet className="w-4 h-4" /> Buy Tickets to Register
                 </button>
@@ -177,7 +177,7 @@ export default function TournamentScreen({ phase, info, onGoToCashier, onWatch, 
             <div className="mt-4 text-3xl font-black font-display text-white">{formatNaira(info.prize ?? 0)}</div>
             <button
               onClick={onGoToCashier}
-              className="mt-5 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-neon-green hover:bg-neon-green/90 text-dark-bg font-mono font-bold text-xs cursor-pointer"
+              className="mt-5 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-neon-green hover:bg-neon-green/90 text-[#050505] font-mono font-bold text-xs cursor-pointer"
             >
               <Wallet className="w-4 h-4" /> View Wallet
             </button>

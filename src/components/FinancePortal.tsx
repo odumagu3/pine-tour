@@ -408,7 +408,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                   {profile.balance < totalCost ? (
                     <button
                       onClick={() => setActiveTab('deposit')}
-                      className="w-full py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-dark-bg font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(0,255,102,0.3)]"
+                      className="w-full py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-[#050505] font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(0,255,102,0.3)]"
                     >
                       Add Funds to Buy ({formatNaira(totalCost)} needed)
                     </button>
@@ -563,7 +563,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
 
                   <button
                     type="submit"
-                    className="w-full py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-dark-bg font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(0,255,102,0.3)] mt-6"
+                    className="w-full py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-[#050505] font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(0,255,102,0.3)] mt-6"
                   >
                     Authorize Simulated Deposit
                   </button>
@@ -731,7 +731,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
 
                   <button
                     type="submit"
-                    className="w-full py-2.5 rounded-lg bg-neon-cyan hover:bg-neon-cyan/90 text-dark-bg font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(0,243,255,0.3)] mt-6"
+                    className="w-full py-2.5 rounded-lg bg-neon-cyan hover:bg-neon-cyan/90 text-[#050505] font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(0,243,255,0.3)] mt-6"
                   >
                     Confirm Payout Routing
                   </button>

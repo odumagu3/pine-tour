@@ -14,6 +14,43 @@
   --color-dark-card: #0a0a0a; /* Premium Near Black */
 }
 
+/* -------------------------------------------------------------------------
+   LIGHT MODE
+   The app is authored dark-first with the slate scale used in a dark-oriented
+   way (low numbers = dark surfaces, high numbers = light text) plus dark-bg /
+   dark-card / white. Since Tailwind v4 emits every utility as var(--color-*),
+   we get a coherent light theme by INVERTING those neutral tokens under
+   [data-theme="light"]. Neon accents stay vivid on both themes.
+   ------------------------------------------------------------------------- */
+:root[data-theme="light"] {
+  --color-dark-bg: #eceef3;   /* page background */
+  --color-dark-card: #ffffff; /* cards / panels */
+  --color-white: #0f172a;     /* was primary light text → now dark ink */
+
+  /* Slate ramp inverted: dark surfaces → light, light text → dark ink */
+  --color-slate-950: #ffffff;
+  --color-slate-900: #f1f3f7;
+  --color-slate-800: #dbe0e8;
+  --color-slate-700: #c4ccd8;
+  --color-slate-600: #98a2b3;
+  --color-slate-500: #667085;
+  --color-slate-400: #55607a;
+  --color-slate-300: #2f3a4d;
+  --color-slate-200: #1c2434;
+  --color-slate-100: #121824;
+  --color-slate-50:  #0b0f18;
+}
+
+/* Softer neon glows on a light background (the bright text still reads). */
+:root[data-theme="light"] .neon-glow-green,
+:root[data-theme="light"] .neon-glow-cyan,
+:root[data-theme="light"] .neon-glow-pink,
+:root[data-theme="light"] .neon-glow-purple {
+  text-shadow: none;
+}
+:root[data-theme="light"] ::-webkit-scrollbar-track { background: #e5e7eb; }
+:root[data-theme="light"] ::-webkit-scrollbar-thumb { background: #c4ccd8; }
+
 /* Custom glowing effects */
 .neon-glow-green {
   text-shadow: 0 0 8px rgba(0, 255, 102, 0.6), 0 0 20px rgba(0, 255, 102, 0.3);

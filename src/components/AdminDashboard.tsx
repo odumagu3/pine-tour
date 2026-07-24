@@ -4,7 +4,6 @@ import { PublicConfig } from '../types.js';
 import { formatNaira } from '../currency.js';
 import { apiUrl } from '../config.js';
 import { ShieldCheck, Lock, Loader2, CheckCircle2, AlertCircle, Save, Building2, Trophy, Ticket, Gamepad2, Users, Unlock } from 'lucide-react';
-import TournamentPanel from './TournamentPanel.tsx';
 
 interface AdminDashboardProps {
   email: string;
@@ -35,7 +34,7 @@ const Toggle: React.FC<{ value: boolean; onChange: (v: boolean) => void; label: 
     <button
       type="button"
       onClick={() => onChange(!value)}
-      className={`px-3 py-1 rounded-lg font-mono font-bold text-[10px] transition-all ${value ? 'bg-neon-green text-dark-bg' : 'bg-slate-800 text-slate-400'}`}
+      className={`px-3 py-1 rounded-lg font-mono font-bold text-[10px] transition-all ${value ? 'bg-neon-green text-[#050505]' : 'bg-slate-800 text-slate-400'}`}
     >
       {value ? 'ON' : 'OFF'}
     </button>
@@ -302,14 +301,14 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
         </div>
       </Section>
 
-      {/* Tournament */}
-      <Section icon={<Trophy className="w-4 h-4" />} title="Tournament">
+      {/* Game — All Hands on Deck (sponsor + prize that fund the game) */}
+      <Section icon={<Trophy className="w-4 h-4" />} title="Game — All Hands on Deck">
         {(() => {
           const active = form.sponsorName.trim().length > 0 && form.sponsorPrize > 0;
           return (
             <div className={`flex items-center gap-2 rounded-lg px-3 py-2 border text-[11px] font-mono ${active ? 'border-neon-green/40 bg-neon-green/5 text-neon-green' : 'border-slate-700 bg-slate-900/40 text-slate-400'}`}>
               <span className={`w-2 h-2 rounded-full ${active ? 'bg-neon-green' : 'bg-slate-500'}`} />
-              {active ? 'Tournament is LIVE — players can enter.' : 'No tournament — players see “No tournaments available”.'}
+              {active ? 'All Hands on Deck is LIVE — players can enter.' : 'No prize set — players see “No game available”.'}
             </div>
           );
         })()}
@@ -323,25 +322,10 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
             <input type="number" className={field} value={form.sponsorPrize} onChange={(e) => update('sponsorPrize', Number(e.target.value))} min={0} />
           </div>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <label className={labelCls}>Field Size (seats)</label>
-            <input type="number" className={field} value={form.fieldSize} onChange={(e) => update('fieldSize', Number(e.target.value))} min={4} max={128} step={4} />
-            <p className="text-[10px] text-slate-500 font-mono mt-1">
-              AI fills empty seats up to this. Rounded to a multiple of 4 (full tables). Quick picks:
-              {[8, 16, 32, 64].map(n => (
-                <button key={n} type="button" onClick={() => update('fieldSize', n)} className="ml-1 px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300">{n}</button>
-              ))}
-            </p>
-          </div>
-        </div>
         <p className="text-[10px] text-slate-500 font-mono">
-          Set a sponsor name and a prize above 0 to open a tournament. Clear the sponsor name (or set the prize to 0) to close all tournaments.
+          Set a sponsor name and a prize above 0 to open the game. The prize goes to the last player standing in All Hands on Deck. Clear the sponsor name (or set the prize to 0) to close it.
         </p>
       </Section>
-
-      {/* Live knockout tournament — create, simulate a field, start, and watch */}
-      <TournamentPanel email={email} passcode={passcode} sponsorName={form.sponsorName} sponsorPrize={form.sponsorPrize} />
 
       {/* Ticket economy */}
       <Section icon={<Ticket className="w-4 h-4" />} title="Ticket Economy">
@@ -409,7 +393,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
                   </button>
                 ))}
               </div>
-              <p className="text-[10px] text-slate-500 font-mono mt-1">Applies instantly (no Save needed). This bot wins any casual “Enter Arena” game and is openly marked to players. Bracket winner is picked in the Live Tournament panel.</p>
+              <p className="text-[10px] text-slate-500 font-mono mt-1">Legacy casual-game rig (the casual game is retired). For All Hands on Deck, use the picker below.</p>
             </div>
           );
         })()}

@@ -134,7 +134,7 @@ export default function AllHandsScreen({
         <button
           onClick={onStart}
           disabled={!seated || starting}
-          className="mt-4 w-full py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-dark-bg font-mono font-bold text-xs tracking-wider shadow-[0_0_15px_rgba(0,255,102,0.25)] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          className="mt-4 w-full py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-[#050505] font-mono font-bold text-xs tracking-wider shadow-[0_0_15px_rgba(0,255,102,0.25)] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
         >
           {starting ? (<><Loader2 className="w-4 h-4 animate-spin" /> Dealing…</>) : 'Deal & Play now'}
         </button>

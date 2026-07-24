@@ -462,7 +462,7 @@ export default function GameBoard({
               {canEnter ? (
                 <button
                   onClick={handleEnterTournament}
-                  className="w-full max-w-sm mx-auto block px-5 py-3 rounded-xl bg-neon-green hover:bg-neon-green/90 text-dark-bg font-mono text-[12px] font-bold transition-all cursor-pointer shadow-[0_0_15px_rgba(16,185,129,0.3)]"
+                  className="w-full max-w-sm mx-auto block px-5 py-3 rounded-xl bg-neon-green hover:bg-neon-green/90 text-[#050505] font-mono text-[12px] font-bold transition-all cursor-pointer shadow-[0_0_15px_rgba(16,185,129,0.3)]"
                 >
                   {hasFreeGame ? '🎁 Play Free Game + Fill Table' : `🎟️ Enter Tournament (1 Ticket) + Fill Table`}
                 </button>
@@ -907,7 +907,7 @@ export default function GameBoard({
             {canEnter ? (
               <button
                 onClick={handleEnterTournament}
-                className="px-6 py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-dark-bg font-mono font-bold text-xs transition-all cursor-pointer shadow-[0_0_12px_rgba(16,185,129,0.3)]"
+                className="px-6 py-2.5 rounded-lg bg-neon-green hover:bg-neon-green/90 text-[#050505] font-mono font-bold text-xs transition-all cursor-pointer shadow-[0_0_12px_rgba(16,185,129,0.3)]"
               >
                 {hasFreeGame ? '🎁 Play Free Game' : '🎟️ Enter Next Tournament (1 Ticket)'}
               </button>

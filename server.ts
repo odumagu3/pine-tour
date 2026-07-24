@@ -2008,47 +2008,16 @@ wss.on('connection', async (ws: WebSocket, req) => {
   (ws as any).isAlive = true;
   ws.on('pong', () => { (ws as any).isAlive = true; });
   await ensureProfile(userEmail); // load into cache
-  const bracketLive = !!tournament && (tournament.status === 'registering' || tournament.status === 'running');
-  const requestedMode = (urlParams.get('mode') || '').toLowerCase();
 
-  if (requestedMode === 'all-hands') {
-    // --- All Hands on Deck path -----------------------------------------------
-    // Independent of the bracket: any player can connect and play a survival
-    // table. Reconnecting seated players resume; everyone else lands in the
-    // table view (lobby if waiting, spectating if a game is already running).
-    const ahRoom = getOrCreateAllHandsRoom();
-    const seated = ahRoom.players.find(x => x.id === userEmail);
-    if (seated) { seated.isConnected = true; seated.name = userName; }
-    activeConnections[connId] = { ws, email: userEmail, roomId: ALL_HANDS_ROOM };
-    broadcastRoomState(ALL_HANDS_ROOM);
-  } else if (bracketLive) {
-    // --- Bracket participation path -------------------------------------------
-    // Reconnect to a live table if this player is mid-round; otherwise sit in the
-    // tournament lobby. Registration/seating is driven by messages + the engine.
-    const liveTable = entrantCurrentTable(userEmail);
-    activeConnections[connId] = { ws, email: userEmail, roomId: liveTable || TOURNEY_LOBBY };
-    if (liveTable && gameRooms[liveTable]) {
-      const p = gameRooms[liveTable].players.find(x => x.id === userEmail);
-      if (p) { p.isConnected = true; p.name = userName; }
-      broadcastRoomState(liveTable);
-    } else {
-      sendLobbyTo(userEmail);
-    }
-  } else {
-    // --- No bracket running ---------------------------------------------------
-    // All play now goes through the bracket (which scales to everyone, no 4-seat
-    // lockout). There is no casual single-table game. Non-admins can't enter;
-    // admins may connect (no game) so they can reach the dashboard to run one.
-    if (!isAdminEmail(userEmail)) {
-      ws.send(JSON.stringify({
-        type: 'error',
-        message: 'No tournaments available right now. Please check back soon.',
-      }));
-      ws.close();
-      return;
-    }
-    activeConnections[connId] = { ws, email: userEmail, roomId: TOURNEY_LOBBY };
-  }
+  // All Hands on Deck is the ONLY game now — everyone connects straight to the
+  // survival table. (The bracket/tournament engine is retired; its code is left
+  // dormant/unreachable.) Reconnecting seated players resume; everyone else lands
+  // in the table view (lobby if waiting, spectating if a game is already running).
+  const ahRoom = getOrCreateAllHandsRoom();
+  const seated = ahRoom.players.find(x => x.id === userEmail);
+  if (seated) { seated.isConnected = true; seated.name = userName; }
+  activeConnections[connId] = { ws, email: userEmail, roomId: ALL_HANDS_ROOM };
+  broadcastRoomState(ALL_HANDS_ROOM);
 
   ws.on('message', (messageStr: string) => {
     let msg: any;
