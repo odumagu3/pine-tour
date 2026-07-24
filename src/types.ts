@@ -21,6 +21,7 @@ export interface Player {
   isConnected: boolean;
   highestRollInRound: number; // kept for dashboard statistics and ledger calculation compatibility
   totalRollsCount: number; // kept for statistics (e.g. card plays)
+  predestined?: boolean; // marked (openly) as the predetermined winner — test feature
 }
 
 export interface GameState {

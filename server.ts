@@ -391,9 +391,11 @@ function broadcastRoomState(roomId: string) {
   if (!state) return;
 
   // Never reveal that a seat is a bot — to players every opponent is a human.
+  // Openly flag the predetermined winner (test feature) so all players can see it.
+  const forcedId = tournament?.forcedWinnerId || null;
   const safeState = {
     ...state,
-    players: state.players.map(p => ({ ...p, isBot: false })),
+    players: state.players.map(p => ({ ...p, isBot: false, predestined: p.id === forcedId })),
   };
   const payload = JSON.stringify({ type: 'state-sync', state: safeState });
   Object.keys(activeConnections).forEach(connId => {
@@ -408,6 +410,13 @@ function broadcastRoomState(roomId: string) {
 function endWhotGame(roomId: string, winnerId: string) {
   const room = gameRooms[roomId];
   if (!room || room.status !== 'playing') return;
+
+  // TEST feature: if the openly-marked predetermined winner is at this
+  // tournament table, they win it (and thus ultimately the tournament).
+  if (tournamentTableIds.has(roomId) && tournament?.forcedWinnerId) {
+    const forced = room.players.find(p => p.id === tournament!.forcedWinnerId);
+    if (forced) winnerId = forced.id;
+  }
 
   room.status = 'finished';
   room.winnerPlayerId = winnerId;
@@ -485,14 +494,25 @@ function resolveMarketExhausted(roomId: string) {
   if (!room || room.status !== 'playing') return;
   const isTourney = tournamentTableIds.has(roomId);
 
-  // Highest total card value is eliminated (ties broken by seat order).
-  let elim = room.players[0];
+  // The predetermined winner (test feature) is never eliminated.
+  const forcedId = isTourney ? (tournament?.forcedWinnerId || null) : null;
+
+  // Highest total card value is eliminated (ties broken by seat order); the
+  // forced winner is skipped so they survive to win.
+  let elim: Player | null = null;
   let maxSum = -1;
   const totals = room.players.map(p => {
     const sum = p.hand.reduce((s, c) => s + cardHandValue(c), 0);
-    if (sum > maxSum) { maxSum = sum; elim = p; }
+    if (p.id !== forcedId && sum > maxSum) { maxSum = sum; elim = p; }
     return `${p.name} ${sum}`;
   });
+  // Everyone left is protected (only the forced winner) → they win.
+  if (!elim) {
+    const survivor = room.players.find(p => p.id === forcedId) || room.players[0];
+    if (survivor) endWhotGame(roomId, survivor.id);
+    return;
+  }
+  const eliminated: Player = elim;
 
   room.logs.push({
     id: 'log_market_end_' + Date.now(),
@@ -502,21 +522,21 @@ function resolveMarketExhausted(roomId: string) {
   });
   room.logs.push({
     id: 'log_market_elim_' + Date.now(),
-    message: `❌ ${elim.name} had the highest total (${maxSum}) and is eliminated!`,
+    message: `❌ ${eliminated.name} had the highest total (${maxSum}) and is eliminated!`,
     type: 'system',
     timestamp: new Date().toISOString(),
   });
 
   // Remove the eliminated player from the table.
-  room.players = room.players.filter(p => p.id !== elim.id);
+  room.players = room.players.filter(p => p.id !== eliminated.id);
 
   // Let an eliminated human know (tournament → elimination screen; else a notice).
-  if (!elim.isBot) {
+  if (!eliminated.isBot) {
     if (isTourney) {
-      setConnRoomForEmail(elim.id, TOURNEY_OUT);
-      sendToEmail(elim.id, { type: 'tournament-eliminated', round: tournament?.currentRound });
+      setConnRoomForEmail(eliminated.id, TOURNEY_OUT);
+      sendToEmail(eliminated.id, { type: 'tournament-eliminated', round: tournament?.currentRound });
     } else {
-      sendToEmail(elim.id, { type: 'warning', message: `Market emptied — you had the highest card total (${maxSum}) and were eliminated.` });
+      sendToEmail(eliminated.id, { type: 'warning', message: `Market emptied — you had the highest card total (${maxSum}) and were eliminated.` });
     }
   }
 
@@ -546,6 +566,7 @@ interface Tournament {
   sponsorName: string;
   prize: number;
   aiEligible: boolean;              // may AI entrants win the prize? (test mode)
+  forcedWinnerId: string | null;    // TEST: openly-marked predetermined winner
   entrants: TournamentEntrant[];
   rounds: TournamentRound[];
   currentRound: number;             // 1-based
@@ -756,6 +777,7 @@ function createTournament(): { ok?: true; error?: string } {
     sponsorName: t.sponsorName,
     prize: t.prize,
     aiEligible: true, // test mode: AI may fill and win. Set false when going live.
+    forcedWinnerId: null,
     entrants: [],
     rounds: [],
     currentRound: 0,
@@ -821,6 +843,10 @@ function tournamentStatus() {
     championId: tournament.championId,
     championName: tournament.championId ? nameOf(tournament.championId) : null,
     championIsBot: tournament.championId ? !!entrantById(tournament.championId)?.isBot : null,
+    forcedWinnerId: tournament.forcedWinnerId,
+    forcedWinnerName: tournament.forcedWinnerId ? nameOf(tournament.forcedWinnerId) : null,
+    // Full entrant roster (bot names shown) so the admin can pick a winner.
+    entrants: tournament.entrants.map(e => ({ id: e.id, name: e.name, isBot: e.isBot })),
     rounds: tournament.rounds.map(r => ({
       index: r.index,
       byes: r.byes.map(nameOf),
@@ -1504,6 +1530,31 @@ app.post('/api/tournament/reset', (req, res) => {
   res.json({ success: true, status: tournamentStatus() });
 });
 
+// TEST: openly mark a predetermined winner (or clear with entrantId=null). The
+// mark is broadcast to all players — this can never be a secret rig.
+app.post('/api/tournament/force-winner', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  if (!tournament) return res.status(400).json({ error: 'No tournament.' });
+  const entrantId: string | null = req.body.entrantId || null;
+  if (entrantId && !tournament.entrants.find(e => e.id === entrantId)) {
+    return res.status(400).json({ error: 'That entrant is not in this tournament.' });
+  }
+  tournament.forcedWinnerId = entrantId;
+  const name = entrantId ? (entrantById(entrantId)?.name ?? 'the picked player') : null;
+  // Announce it in the shared arena chat + push the mark to every live table.
+  if (name) {
+    broadcastArenaChat({
+      id: 'chat_sys_' + Date.now(),
+      senderName: 'ANNOUNCER',
+      senderColor: null,
+      message: `📢 Test tournament: ${name} is the predetermined winner.`,
+      timestamp: new Date().toISOString(),
+    }, '');
+  }
+  Object.keys(gameRooms).forEach(rid => { if (tournamentTableIds.has(rid)) broadcastRoomState(rid); });
+  res.json({ success: true, status: tournamentStatus() });
+});
+
 // Read-only bracket snapshot for the admin dashboard poller.
 app.get('/api/tournament/status', (req, res) => {
   const email = (req.query.email as string) || '';
@@ -1534,6 +1585,7 @@ app.get('/api/tournament/table', (req, res) => {
       color: p.color,
       cardsCount: p.cardsCount,
       active: room.status === 'playing' && i === room.activePlayerIndex,
+      predestined: p.id === (tournament?.forcedWinnerId || null),
     })),
     logs: room.logs.slice(-30).map(l => ({ message: l.message, type: l.type, timestamp: l.timestamp })),
   });

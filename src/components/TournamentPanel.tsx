@@ -21,6 +21,9 @@ interface TournamentStatus {
   totalRounds?: number;
   championName?: string | null;
   championIsBot?: boolean | null;
+  forcedWinnerId?: string | null;
+  forcedWinnerName?: string | null;
+  entrants?: { id: string; name: string; isBot: boolean }[];
   rounds?: StatusRound[];
 }
 
@@ -105,6 +108,36 @@ export default function TournamentPanel({ email, passcode }: TournamentPanelProp
           <Stat label="Players" value={String(status?.entrantCount ?? 0)} />
           <Stat label="Round" value={st === 'registering' ? '—' : `${status?.currentRound}/${status?.totalRounds}`} />
           <Stat label="Prize" value={formatNaira(status?.prize ?? 0)} />
+        </div>
+      )}
+
+      {/* Predetermined winner (TEST). Openly marked to all players. */}
+      {exists && (st === 'registering' || st === 'running') && (status?.entrants?.length ?? 0) > 0 && (
+        <div className="border border-amber-500/30 bg-amber-950/10 rounded-xl p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <h4 className="text-[11px] font-mono font-bold text-amber-300 flex items-center gap-1.5">
+              <Crown className="w-3.5 h-3.5" /> Predetermined Winner — TEST
+            </h4>
+            {status?.forcedWinnerId && (
+              <button onClick={() => action('force-winner', { entrantId: null })} disabled={busy !== null} className="text-[10px] font-mono text-slate-400 hover:text-white cursor-pointer">Clear pick</button>
+            )}
+          </div>
+          {status?.forcedWinnerName
+            ? <p className="text-[10px] font-mono text-amber-200">Picked: <strong>{status.forcedWinnerName}</strong> — shown to every player as the guaranteed winner.</p>
+            : <p className="text-[10px] font-mono text-slate-400">Tap a player to make them win. Everyone will see a “winner” mark on them.</p>}
+          <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1 pr-1">
+            {status?.entrants?.map(e => (
+              <button
+                key={e.id}
+                onClick={() => action('force-winner', { entrantId: e.id })}
+                disabled={busy !== null}
+                className={`text-left text-[10px] font-mono px-2 py-1 rounded border truncate cursor-pointer ${status.forcedWinnerId === e.id ? 'border-amber-500 bg-amber-500/15 text-amber-200 font-bold' : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:border-amber-500/50'}`}
+              >
+                {status.forcedWinnerId === e.id && '👑 '}{e.name}{e.isBot && <span className="text-slate-500"> · AI</span>}
+              </button>
+            ))}
+          </div>
+          <p className="text-[9px] text-slate-500 font-mono">⚠️ Turn this off before real players/payments — the mark is visible to everyone by design.</p>
         </div>
       )}
 
@@ -232,7 +265,7 @@ interface TableSnapshot {
   requestedSuit?: string | null;
   drawPileCount?: number;
   winnerName?: string | null;
-  players?: { name: string; color: string | null; cardsCount: number; active: boolean }[];
+  players?: { name: string; color: string | null; cardsCount: number; active: boolean; predestined?: boolean }[];
   logs?: { message: string; type: string; timestamp: string }[];
 }
 
@@ -303,7 +336,8 @@ function WatchTableModal({ email, roomId, label, onClose }: { email: string; roo
                 <div key={i} className={`flex items-center justify-between rounded-lg border px-2.5 py-1.5 ${p.active ? 'border-neon-cyan bg-neon-cyan/10 shadow-[0_0_10px_rgba(0,243,255,0.15)]' : snap.winnerName === p.name ? 'border-neon-green/40 bg-neon-green/5' : 'border-slate-800 bg-slate-900/40'}`}>
                   <span className="flex items-center gap-1.5 min-w-0">
                     <span className={`w-2 h-2 rounded-full flex-shrink-0 ${COLOR_DOT[p.color ?? ''] ?? 'bg-slate-600'}`} />
-                    <span className={`text-[11px] font-mono truncate ${p.active ? 'text-white font-bold' : 'text-slate-300'}`}>{p.name}</span>
+                    <span className={`text-[11px] font-mono truncate ${p.predestined ? 'text-amber-300 font-bold' : p.active ? 'text-white font-bold' : 'text-slate-300'}`}>{p.name}</span>
+                    {p.predestined && <Crown className="w-3 h-3 text-amber-400 flex-shrink-0" />}
                     {snap.winnerName === p.name && <Crown className="w-3 h-3 text-neon-green flex-shrink-0" />}
                   </span>
                   <span className="text-[11px] font-mono font-bold text-slate-400 flex-shrink-0">{p.cardsCount}🂠</span>

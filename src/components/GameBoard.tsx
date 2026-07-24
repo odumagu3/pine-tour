@@ -496,13 +496,16 @@ export default function GameBoard({
                       <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-yellow-500 rounded-full animate-ping" />
                     )}
                     <div className="relative">
-                      <div className={`w-8 h-8 rounded-xl flex items-center justify-center text-sm border bg-slate-900/60 ${colorTheme}`}>
+                      <div className={`w-8 h-8 rounded-xl flex items-center justify-center text-sm border bg-slate-900/60 ${colorTheme} ${seat.player.predestined ? 'ring-2 ring-amber-400' : ''}`}>
                         {"👤"}
                       </div>
                       <span className={`absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-slate-950 ${seat.player.isConnected ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                      {seat.player.predestined && <span className="absolute -top-2 -left-2 text-[11px]" title="Predetermined winner">👑</span>}
                     </div>
-                    <span className="text-[10px] font-bold text-white max-w-full truncate w-full text-center">{seat.player.name}</span>
-                    <span className="text-[9px] text-slate-400">🎴 {seat.player.cardsCount}</span>
+                    <span className={`text-[10px] font-bold max-w-full truncate w-full text-center ${seat.player.predestined ? 'text-amber-300' : 'text-white'}`}>{seat.player.name}</span>
+                    {seat.player.predestined
+                      ? <span className="text-[8px] font-mono text-amber-400 uppercase tracking-wide">👑 Winner</span>
+                      : <span className="text-[9px] text-slate-400">🎴 {seat.player.cardsCount}</span>}
                   </div>
                 );
               })}
@@ -550,14 +553,16 @@ export default function GameBoard({
                     )}
 
                     <div className="relative">
-                      <div className={`w-6 h-6 sm:w-8 sm:h-8 rounded-lg sm:rounded-xl flex items-center justify-center font-bold text-[10px] sm:text-xs border ${playerColorTheme}`}>
+                      <div className={`w-6 h-6 sm:w-8 sm:h-8 rounded-lg sm:rounded-xl flex items-center justify-center font-bold text-[10px] sm:text-xs border ${playerColorTheme} ${seat.player.predestined ? 'ring-2 ring-amber-400' : ''}`}>
                         {"👤"}
                       </div>
                       <span className={`absolute -bottom-1 -right-1 w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full border border-slate-950 ${seat.player.isConnected ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                      {seat.player.predestined && <span className="absolute -top-2 -left-2 text-[11px]" title="Predetermined winner">👑</span>}
                     </div>
 
                     <div className="text-left text-[9px] sm:text-[10px]">
-                      <div className="font-bold text-white max-w-[52px] sm:max-w-[80px] truncate">{seat.player.name} {isMe && "(You)"}</div>
+                      <div className={`font-bold max-w-[52px] sm:max-w-[80px] truncate ${seat.player.predestined ? 'text-amber-300' : 'text-white'}`}>{seat.player.name} {isMe && "(You)"}</div>
+                      {seat.player.predestined && <div className="text-[8px] font-mono text-amber-400 uppercase tracking-wide">👑 Winner</div>}
                       <div className="text-slate-500 flex items-center gap-1">
                         <span>🎴 {seat.player.cardsCount}<span className="hidden sm:inline"> cards</span></span>
                       </div>
