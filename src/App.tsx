@@ -839,7 +839,9 @@ export default function App() {
                       <h3 className="text-sm font-bold font-display text-white">No game in progress</h3>
                       <p className="text-xs text-slate-400 font-mono leading-relaxed">
                         {config?.isAdmin
-                          ? 'Open the Admin panel to create and start a tournament — players register and play from there.'
+                          ? (config?.tournamentActive
+                              ? `“${config.sponsorName}” (${formatNaira(config.sponsorPrize)}) is set up but not launched yet. In the Admin panel, scroll to “Live Tournament”, press Create, add players (Simulate), then Start.`
+                              : 'Set a Sponsor & Prize in the Admin panel, then in “Live Tournament” press Create → add players → Start.')
                           : bracketPublic?.open
                           ? 'Registration is open — grab your spot from the lobby.'
                           : 'No tournament is running right now. Check back when one is announced.'}

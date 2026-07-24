@@ -326,7 +326,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
       </Section>
 
       {/* Live knockout tournament — create, simulate a field, start, and watch */}
-      <TournamentPanel email={email} passcode={passcode} />
+      <TournamentPanel email={email} passcode={passcode} sponsorName={form.sponsorName} sponsorPrize={form.sponsorPrize} />
 
       {/* Ticket economy */}
       <Section icon={<Ticket className="w-4 h-4" />} title="Ticket Economy">

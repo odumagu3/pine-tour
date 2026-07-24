@@ -6,6 +6,8 @@ import { apiUrl } from '../config.js';
 interface TournamentPanelProps {
   email: string;
   passcode: string;
+  sponsorName?: string;
+  sponsorPrize?: number;
 }
 
 interface StatusPlayer { name: string; isBot: boolean; }
@@ -27,7 +29,7 @@ interface TournamentStatus {
   rounds?: StatusRound[];
 }
 
-export default function TournamentPanel({ email, passcode }: TournamentPanelProps) {
+export default function TournamentPanel({ email, passcode, sponsorName = '', sponsorPrize = 0 }: TournamentPanelProps) {
   const [status, setStatus] = useState<TournamentStatus | null>(null);
   const [simCount, setSimCount] = useState(50);
   const [busy, setBusy] = useState<string | null>(null);
@@ -144,12 +146,18 @@ export default function TournamentPanel({ email, passcode }: TournamentPanelProp
       {/* Controls per phase */}
       {!exists && (
         <div className="space-y-2">
-          <p className="text-[11px] text-slate-400 font-mono">
-            Uses the Sponsor + Prize from the <span className="text-neon-purple">Tournament</span> section above — set those first.
-          </p>
-          <button onClick={() => action('create')} disabled={busy !== null} className={`${btn} bg-neon-green/10 border border-neon-green/40 text-neon-green w-full`}>
+          {sponsorName && sponsorPrize > 0 ? (
+            <p className="text-[11px] text-slate-300 font-mono">
+              Ready to launch: <span className="text-white font-bold">{sponsorName}</span> · <span className="text-neon-green font-bold">{formatNaira(sponsorPrize)}</span>. This is the step that actually runs your tournament.
+            </p>
+          ) : (
+            <p className="text-[11px] text-amber-400 font-mono">
+              Set a Sponsor name + Cash Prize in the Tournament section above first — then create.
+            </p>
+          )}
+          <button onClick={() => action('create')} disabled={busy !== null || !(sponsorName && sponsorPrize > 0)} className={`${btn} bg-neon-green/10 border border-neon-green/40 text-neon-green w-full disabled:opacity-40`}>
             {busy === 'create' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trophy className="w-4 h-4" />}
-            Create Tournament
+            {sponsorName && sponsorPrize > 0 ? `Create Tournament — ${sponsorName} (${formatNaira(sponsorPrize)})` : 'Create Tournament'}
           </button>
         </div>
       )}
