@@ -27,6 +27,11 @@ export interface Player {
 export interface GameState {
   roomId: string;
   status: 'waiting' | 'betting' | 'playing' | 'finished';
+  // Which segment this table belongs to. 'tournament' = normal Whot (empty your
+  // hand to win). 'all-hands' = All Hands on Deck survival mode (no checkout win;
+  // when the market runs dry the highest hand total is eliminated, last standing
+  // wins). Absent/undefined is treated as 'tournament' for backward compatibility.
+  mode?: 'tournament' | 'all-hands';
   players: Player[];
   pot: number;
   activePlayerIndex: number;

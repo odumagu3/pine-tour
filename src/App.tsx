@@ -9,6 +9,7 @@ import PrivacyPortal from './components/PrivacyPortal.tsx';
 import AdminDashboard from './components/AdminDashboard.tsx';
 import TournamentScreen from './components/TournamentScreen.tsx';
 import TournamentSpectator from './components/TournamentSpectator.tsx';
+import AllHandsScreen from './components/AllHandsScreen.tsx';
 import AuthGate from './components/AuthGate.tsx';
 import InstallButton from './components/InstallButton.tsx';
 import { InAppNotifications } from './components/InAppNotifications.tsx';
@@ -96,6 +97,17 @@ export default function App() {
   const wantRegisterRef = useRef(false);
   const tourneyOverlay = tourneyPhase === 'join' || tourneyPhase === 'lobby' || tourneyPhase === 'waiting' || tourneyPhase === 'eliminated' || tourneyPhase === 'champion';
 
+  // All Hands on Deck — a separate survival segment (independent of the bracket).
+  // `mode` decides which segment this session is playing; `modeRef` mirrors it so
+  // the (non-memoized) socket callbacks read the current value on reconnect.
+  const [mode, setMode] = useState<'tournament' | 'all-hands'>('tournament');
+  const modeRef = useRef<'tournament' | 'all-hands'>('tournament');
+  const wantEnterAllHandsRef = useRef(false);
+  const [allHandsStarting, setAllHandsStarting] = useState(false);
+  const [allHandsEliminated, setAllHandsEliminated] = useState(false);
+  const [allHandsResult, setAllHandsResult] = useState<{ youWon: boolean; winnerName: string; prize: number } | null>(null);
+  const setPlayMode = (m: 'tournament' | 'all-hands') => { modeRef.current = m; setMode(m); };
+
   // Send the register message over the live socket (used from the Join panel).
   const sendTournamentRegister = () => {
     setTourneyError('');
@@ -137,7 +149,8 @@ export default function App() {
     shouldReconnectRef.current = true;
 
     setConnectionError('');
-    const url = wsUrl(`?email=${encodeURIComponent(email)}&name=${encodeURIComponent(userName)}&roomId=${encodeURIComponent(roomId)}`);
+    const modeParam = modeRef.current === 'all-hands' ? '&mode=all-hands' : '';
+    const url = wsUrl(`?email=${encodeURIComponent(email)}&name=${encodeURIComponent(userName)}&roomId=${encodeURIComponent(roomId)}${modeParam}`);
 
     const socket = new WebSocket(url);
     socketRef.current = socket;
@@ -151,6 +164,11 @@ export default function App() {
       if (wantRegisterRef.current) {
         socket.send(JSON.stringify({ type: 'tournament-register' }));
         wantRegisterRef.current = false;
+      }
+      // If the user chose All Hands on Deck, take a seat once connected.
+      if (wantEnterAllHandsRef.current) {
+        socket.send(JSON.stringify({ type: 'enter-all-hands' }));
+        wantEnterAllHandsRef.current = false;
       }
     };
 
@@ -208,6 +226,28 @@ export default function App() {
           fetchProfile();
           setGameplayNotice(data.championName ? `🏆 Tournament over — ${data.championName} won!` : 'Tournament over.');
           setTimeout(() => setGameplayNotice((prev) => (prev && prev.includes('Tournament over') ? null : prev)), 6000);
+          break;
+
+        // --- All Hands on Deck events ---
+        case 'all-hands-showdown': {
+          setAllHandsStarting(false);
+          const msg = `⚔️ Showdown! ${data.eliminatedName} is out (highest total ${data.maxSum}). ${data.remaining} left.`;
+          setGameplayNotice(msg);
+          setTimeout(() => setGameplayNotice((prev) => (prev === msg ? null : prev)), 5000);
+          break;
+        }
+        case 'all-hands-eliminated':
+          setAllHandsEliminated(true);
+          setGameplayNotice(`❌ You had the highest total (${data.total}) and are out. Watching the rest…`);
+          break;
+        case 'all-hands-winner':
+          setAllHandsStarting(false);
+          setAllHandsResult({
+            youWon: (data.winnerId || '').toLowerCase() === email.toLowerCase(),
+            winnerName: data.winnerName,
+            prize: data.prize,
+          });
+          fetchProfile();
           break;
         case 'tournament-cancelled':
           shouldReconnectRef.current = false;
@@ -394,6 +434,10 @@ export default function App() {
     setProfile(null);
     setTourneyPhase('none');
     setSpectating(false);
+    setPlayMode('tournament');
+    setAllHandsEliminated(false);
+    setAllHandsResult(null);
+    wantEnterAllHandsRef.current = false;
     await supabase.auth.signOut();
   };
 
@@ -412,6 +456,42 @@ export default function App() {
   const handleAddBots = () => {
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({ type: 'add-bots-manually' }));
+    }
+  };
+
+  // --- All Hands on Deck (survival segment) ---------------------------------
+  // Join from the lobby: connect in all-hands mode and take a seat on open.
+  const handleEnterAllHands = () => {
+    savePrefs({ userName, roomId: config?.roomName || roomId });
+    setPlayMode('all-hands');
+    setAllHandsEliminated(false);
+    setAllHandsResult(null);
+    setAllHandsStarting(false);
+    setGameState(null);
+    wantEnterAllHandsRef.current = true;
+    setIsJoined(true);
+    setActiveTab('board');
+    connectWebSocket();
+  };
+
+  // Fill empty seats with AI and deal immediately.
+  const handleStartAllHands = () => {
+    setAllHandsStarting(true);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'start-all-hands' }));
+    }
+  };
+
+  // After a result, re-enter for a fresh table (server resets the finished game).
+  const handleAllHandsPlayAgain = () => {
+    setAllHandsEliminated(false);
+    setAllHandsResult(null);
+    setGameState(null);
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'enter-all-hands' }));
+    } else {
+      wantEnterAllHandsRef.current = true;
+      connectWebSocket();
     }
   };
 
@@ -556,6 +636,28 @@ export default function App() {
               </button>
             </form>
 
+            {/* All Hands on Deck — a quick survival game vs AI (and anyone else
+                who joins), independent of the bracket. Available whenever a
+                sponsor + prize is configured. */}
+            {config?.tournamentActive && (
+              <div className="mt-4 pt-4 border-t border-dashed border-slate-800">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-neon-purple">⚔️ Or play now</span>
+                  <span className="text-[10px] font-mono text-slate-500">Survival · last standing wins</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleEnterAllHands}
+                  className="w-full py-2.5 rounded-lg bg-slate-900 border border-neon-green/40 hover:bg-neon-green/10 text-neon-green font-mono font-bold text-xs transition-all tracking-wider cursor-pointer"
+                >
+                  All Hands on Deck
+                </button>
+                <p className="text-[10px] font-mono text-slate-500 mt-1.5 text-center">
+                  No checkout win — when the deck runs dry, the highest hand is knocked out.
+                </p>
+              </div>
+            )}
+
             {/* Install as a mobile app (hidden once installed / standalone) */}
             <div className="mt-4">
               <InstallButton variant="full" />
@@ -698,6 +800,22 @@ export default function App() {
                 {activeTab === 'board' && (
                   spectating ? (
                     <TournamentSpectator email={email} onClose={() => setSpectating(false)} />
+                  ) : (mode === 'all-hands' && (allHandsResult || !(gameState && gameState.status === 'playing'))) ? (
+                    <AllHandsScreen
+                      gameState={gameState}
+                      email={email}
+                      myName={userName}
+                      sponsorName={config?.sponsorName}
+                      prize={config?.sponsorPrize}
+                      result={allHandsResult}
+                      starting={allHandsStarting}
+                      onStart={handleStartAllHands}
+                      onPlayAgain={handleAllHandsPlayAgain}
+                      chatMessages={chatMessages}
+                      chatInput={currentChatMessage}
+                      onChatInput={setCurrentChatMessage}
+                      onSendChat={handleSendChat}
+                    />
                   ) : tourneyOverlay ? (
                     <TournamentScreen
                       phase={tourneyPhase as 'join' | 'lobby' | 'waiting' | 'eliminated' | 'champion'}
@@ -718,6 +836,11 @@ export default function App() {
                     />
                   ) : gameState ? (
                   <div className="space-y-6">
+                    {mode === 'all-hands' && allHandsEliminated && (
+                      <div className="max-w-6xl mx-auto bg-red-950/40 border border-red-500/30 rounded-xl px-4 py-2.5 text-center text-xs font-mono text-red-300">
+                        ❌ You're out — spectating the rest of All Hands on Deck.
+                      </div>
+                    )}
                     <GameBoard
                       gameState={gameState}
                       profile={profile}

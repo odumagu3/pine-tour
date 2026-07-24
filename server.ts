@@ -415,12 +415,15 @@ function endWhotGame(roomId: string, winnerId: string) {
 
   const winner = room.players.find(p => p.id === winnerId);
   const isTourney = tournamentTableIds.has(roomId);
+  const isAllHands = room.mode === 'all-hands';
   const prizeAmount = room.sponsorPrize;
   const sponsor = room.sponsorName || 'Tournament Sponsor';
 
   room.logs.push({
     id: 'log_end_' + Date.now(),
-    message: `🏆 ${winner ? winner.name : 'Unknown'} played all cards and won the table!`,
+    message: isAllHands
+      ? `🏆 ${winner ? winner.name : 'Unknown'} is the last player standing and wins All Hands on Deck!`
+      : `🏆 ${winner ? winner.name : 'Unknown'} played all cards and won the table!`,
     type: 'win',
     timestamp: new Date().toISOString(),
   });
@@ -448,7 +451,7 @@ function endWhotGame(roomId: string, winnerId: string) {
       amount: prizeAmount,
       status: 'completed',
       timestamp: new Date().toISOString(),
-      method: `${sponsor} Tournament Prize`,
+      method: isAllHands ? `${sponsor} All Hands on Deck Prize` : `${sponsor} Tournament Prize`,
       txHash: 'hash_win_' + Math.random().toString(36).substring(2, 9),
       balanceAfter: profile.balance,
     });
@@ -468,6 +471,18 @@ function endWhotGame(roomId: string, winnerId: string) {
 
   // Notify the bracket so the winner can advance / the champion be crowned.
   if (isTourney) onTournamentTableEnd(roomId, winnerId);
+
+  // All Hands: tell everyone still subscribed (winner + spectating eliminees)
+  // who took the prize so clients can show the last-player-standing result.
+  if (isAllHands) {
+    broadcastEventToRoom(ALL_HANDS_ROOM, {
+      type: 'all-hands-winner',
+      winnerName: winner ? winner.name : 'Unknown',
+      winnerId,
+      prize: prizeAmount,
+      sponsorName: sponsor,
+    });
+  }
 }
 
 // A star card counts DOUBLE its face value; Whot (20) counts as 20.
@@ -484,6 +499,7 @@ function resolveMarketExhausted(roomId: string) {
   const room = gameRooms[roomId];
   if (!room || room.status !== 'playing') return;
   const isTourney = tournamentTableIds.has(roomId);
+  const isAllHands = room.mode === 'all-hands';
 
   // The predetermined winner (test feature) is never eliminated.
   const forcedWin = forcedPlayerInRoom(roomId, room);
@@ -518,14 +534,36 @@ function resolveMarketExhausted(roomId: string) {
     timestamp: new Date().toISOString(),
   });
 
+  // All Hands showdown: reveal every hand total and who's knocked out so clients
+  // can play the count-up + elimination moment. Sent before removal so the
+  // payload includes the eliminated player.
+  if (isAllHands) {
+    broadcastEventToRoom(ALL_HANDS_ROOM, {
+      type: 'all-hands-showdown',
+      eliminatedName: eliminated.name,
+      maxSum,
+      remaining: room.players.length - 1,
+      totals: room.players.map(p => ({
+        name: p.name,
+        total: p.hand.reduce((s, c) => s + cardHandValue(c), 0),
+        eliminated: p.id === eliminated.id,
+      })),
+    });
+  }
+
   // Remove the eliminated player from the table.
   room.players = room.players.filter(p => p.id !== eliminated.id);
 
-  // Let an eliminated human know (tournament → elimination screen; else a notice).
+  // Let an eliminated human know. Tournament → elimination screen. All Hands →
+  // keep them subscribed to the table so they can spectate the rest. Otherwise a
+  // plain notice.
   if (!eliminated.isBot) {
     if (isTourney) {
       setConnRoomForEmail(eliminated.id, TOURNEY_OUT);
       sendToEmail(eliminated.id, { type: 'tournament-eliminated', round: tournament?.currentRound });
+    } else if (isAllHands) {
+      setConnRoomForEmail(eliminated.id, ALL_HANDS_ROOM);
+      sendToEmail(eliminated.id, { type: 'all-hands-eliminated', total: maxSum, remaining: room.players.length });
     } else {
       sendToEmail(eliminated.id, { type: 'warning', message: `Market emptied — you had the highest card total (${maxSum}) and were eliminated.` });
     }
@@ -874,6 +912,175 @@ function tournamentTargetSize(): number {
   return Math.max(4, Math.round(clamped / 4) * 4);
 }
 
+// =============================================================================
+// ALL HANDS ON DECK — survival segment
+// A single self-contained table (2–4 seats), independent of the bracket. There
+// is NO checkout win: play continues until the market's draw pile is exhausted,
+// then every hand is totalled and the highest total is knocked out. Survivors
+// are redealt and it repeats until one player is left standing, who takes the
+// sponsor prize. Reuses the core Whot engine; only the win/elimination rules
+// differ (branched on room.mode === 'all-hands').
+// =============================================================================
+const ALL_HANDS_ROOM = '__all_hands'; // the single live All Hands table
+const ALL_HANDS_LOBBY = '__ah_lobby'; // connected, choosing to enter
+
+// Starting seat count (2–4). In-memory only for now (no schema migration); the
+// prize/sponsor are taken from the arena's configured fixed prize.
+let allHandsSize = 4;
+function clampAllHandsSize(n: number): number {
+  return Math.max(2, Math.min(4, Math.round(n) || 4));
+}
+
+// All Hands is available whenever the arena has a sponsor + positive prize set.
+function allHandsPrizeInfo(): { sponsorName: string; prize: number; active: boolean } {
+  const sponsorName = adminConfig.fixedSponsorName.trim();
+  const prize = adminConfig.fixedPrize;
+  return { sponsorName, prize, active: sponsorName.length > 0 && prize > 0 };
+}
+
+// Send an arbitrary event to every connection currently in a room.
+function broadcastEventToRoom(roomId: string, obj: any) {
+  const payload = JSON.stringify(obj);
+  Object.keys(activeConnections).forEach(connId => {
+    const conn = activeConnections[connId];
+    if (conn.roomId === roomId && conn.ws.readyState === WebSocket.OPEN) {
+      conn.ws.send(payload);
+    }
+  });
+}
+
+function getOrCreateAllHandsRoom(): GameState {
+  let room = gameRooms[ALL_HANDS_ROOM];
+  if (!room) {
+    const { sponsorName, prize } = allHandsPrizeInfo();
+    room = gameRooms[ALL_HANDS_ROOM] = {
+      roomId: ALL_HANDS_ROOM,
+      status: 'waiting',
+      mode: 'all-hands',
+      players: [],
+      pot: prize,
+      activePlayerIndex: 0,
+      logs: [{
+        id: 'log_ah_' + Date.now(),
+        message: `🃏 All Hands on Deck is open — last player standing wins ₦${prize.toLocaleString('en-NG')}. Enter to play!`,
+        type: 'system',
+        timestamp: new Date().toISOString(),
+      }],
+      turnTimeLeft: adminConfig.turnTimerSeconds,
+      winnerPlayerId: null,
+      potWinnerId: null,
+      antiCheatLog: [],
+      sponsorName,
+      sponsorPrize: prize,
+      drawPileCount: 0,
+      discardPile: [],
+      requestedSuit: null,
+      turnDirection: 1,
+    };
+  }
+  return room;
+}
+
+// Fill empty seats with bots up to the configured All Hands size (2–4).
+function fillAllHandsBots(room: GameState) {
+  const colors: PlayerColor[] = ['red', 'green', 'yellow', 'blue'];
+  const cap = clampAllHandsSize(allHandsSize);
+  const pool = botNamePool();
+  while (room.players.length < cap) {
+    const assigned = room.players.map(p => p.color).filter(Boolean) as PlayerColor[];
+    const color = colors.find(c => !assigned.includes(c));
+    if (!color) break;
+    const taken = new Set(room.players.map(p => p.name));
+    const name = pool.find(n => !taken.has(n)) || pool[Math.floor(Math.random() * pool.length)];
+    room.players.push({
+      id: 'bot_' + color,
+      name,
+      color,
+      isBot: true,
+      balance: 0,
+      currentBet: 0,
+      ready: true,
+      cardsCount: 0,
+      hand: [],
+      isConnected: true,
+      highestRollInRound: 0,
+      totalRollsCount: 0,
+    });
+    room.logs.push({
+      id: 'log_ah_join_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5),
+      message: `👤 ${name} takes the ${color.toUpperCase()} seat!`,
+      type: 'info',
+      timestamp: new Date().toISOString(),
+    });
+  }
+}
+
+// Seat a human into the All Hands table (idempotent). Returns null if full.
+function seatAllHandsHuman(room: GameState, email: string, name: string): Player | null {
+  const existing = room.players.find(x => x.id === email);
+  if (existing) { existing.ready = true; existing.isConnected = true; existing.name = name; return existing; }
+  const colors: PlayerColor[] = ['red', 'green', 'yellow', 'blue'];
+  const assigned = room.players.map(x => x.color).filter(Boolean) as PlayerColor[];
+  const color = colors.find(c => !assigned.includes(c));
+  if (!color) return null; // table full
+  const p: Player = {
+    id: email,
+    name,
+    color,
+    isBot: false,
+    balance: getProfile(email).balance,
+    currentBet: 0,
+    ready: true,
+    cardsCount: 0,
+    hand: [],
+    isConnected: true,
+    highestRollInRound: 0,
+    totalRollsCount: 0,
+  };
+  room.players.push(p);
+  room.logs.push({
+    id: 'log_ah_seat_' + Date.now(),
+    message: `🎮 ${name} joined the All Hands table on the ${color.toUpperCase()} seat!`,
+    type: 'info',
+    timestamp: new Date().toISOString(),
+  });
+  return p;
+}
+
+// Fill any empty seats with bots and deal the first round.
+function startAllHands(room: GameState) {
+  fillAllHandsBots(room);
+  room.pot = room.sponsorPrize;
+  startWhotGameSession(room);
+}
+
+// Reset a finished All Hands table back to an open lobby for a fresh game.
+function resetAllHandsRoom(room: GameState) {
+  const { sponsorName, prize } = allHandsPrizeInfo();
+  room.status = 'waiting';
+  room.mode = 'all-hands';
+  room.winnerPlayerId = null;
+  room.potWinnerId = null;
+  room.requestedSuit = null;
+  room.turnDirection = 1;
+  room.turnTimeLeft = adminConfig.turnTimerSeconds;
+  room.activePlayerIndex = 0;
+  room.discardPile = [];
+  (room as any).drawPile = [];
+  room.drawPileCount = 0;
+  room.antiCheatLog = [];
+  room.sponsorName = sponsorName;
+  room.sponsorPrize = prize;
+  room.pot = prize;
+  room.players = []; // everyone re-enters for a fresh game
+  room.logs.push({
+    id: 'log_ah_reset_' + Date.now(),
+    message: `🔄 New All Hands table open — ₦${prize.toLocaleString('en-NG')} to the last player standing. Enter to play!`,
+    type: 'system',
+    timestamp: new Date().toISOString(),
+  });
+}
+
 // Casual banter the AI opponents drop into the arena chat so tables feel human.
 const BOT_CHAT_LINES = [
   'Good luck everyone! 🍀', "Let's go 🔥", 'This prize is mine 😎', 'Who else is nervous 😅',
@@ -1054,8 +1261,11 @@ function executeWhotPlayCard(roomId: string, playerId: string, cardId: string) {
     timestamp: new Date().toISOString(),
   });
 
-  // Victory check
-  if (activeP.cardsCount === 0) {
+  // Victory check. In All Hands on Deck there is no checkout win — emptying your
+  // hand just gives you a 0 total (safe at the next showdown) and play continues;
+  // you'll draw on your next turn if you still have no playable card. In every
+  // other mode, emptying your hand wins the table outright.
+  if (activeP.cardsCount === 0 && room.mode !== 'all-hands') {
     endWhotGame(roomId, activeP.id);
     return;
   }
@@ -1284,7 +1494,9 @@ function startWhotGameSession(room: GameState) {
 
   room.logs.push({
     id: 'log_start_' + Date.now(),
-    message: `🚀 ${room.sponsorName || 'Sponsored'} Tournament started! Each player has 5 cards. Cash prize: ₦${room.sponsorPrize.toLocaleString('en-NG')}.`,
+    message: room.mode === 'all-hands'
+      ? `🚀 All Hands on Deck! Each player has 5 cards. When the market runs dry, the highest hand is out. Last standing wins ₦${room.sponsorPrize.toLocaleString('en-NG')}.`
+      : `🚀 ${room.sponsorName || 'Sponsored'} Tournament started! Each player has 5 cards. Cash prize: ₦${room.sponsorPrize.toLocaleString('en-NG')}.`,
     type: 'system',
     timestamp: new Date().toISOString(),
   });
@@ -1735,8 +1947,19 @@ wss.on('connection', async (ws: WebSocket, req) => {
   ws.on('pong', () => { (ws as any).isAlive = true; });
   await ensureProfile(userEmail); // load into cache
   const bracketLive = !!tournament && (tournament.status === 'registering' || tournament.status === 'running');
+  const requestedMode = (urlParams.get('mode') || '').toLowerCase();
 
-  if (bracketLive) {
+  if (requestedMode === 'all-hands') {
+    // --- All Hands on Deck path -----------------------------------------------
+    // Independent of the bracket: any player can connect and play a survival
+    // table. Reconnecting seated players resume; everyone else lands in the
+    // table view (lobby if waiting, spectating if a game is already running).
+    const ahRoom = getOrCreateAllHandsRoom();
+    const seated = ahRoom.players.find(x => x.id === userEmail);
+    if (seated) { seated.isConnected = true; seated.name = userName; }
+    activeConnections[connId] = { ws, email: userEmail, roomId: ALL_HANDS_ROOM };
+    broadcastRoomState(ALL_HANDS_ROOM);
+  } else if (bracketLive) {
     // --- Bracket participation path -------------------------------------------
     // Reconnect to a live table if this player is mid-round; otherwise sit in the
     // tournament lobby. Registration/seating is driven by messages + the engine.
@@ -1782,6 +2005,49 @@ wss.on('connection', async (ws: WebSocket, req) => {
         setConnRoomForEmail(userEmail, TOURNEY_LOBBY);
         broadcastLobby();
       }
+      return;
+    }
+
+    // Join the All Hands on Deck table (handled before the room guard because the
+    // player isn't seated yet). Auto-starts once enough humans join to fill it.
+    if (msg.type === 'enter-all-hands') {
+      const room = getOrCreateAllHandsRoom();
+      if (room.status === 'finished') resetAllHandsRoom(room);
+      if (room.status === 'playing') {
+        setConnRoomForEmail(userEmail, ALL_HANDS_ROOM);
+        ws.send(JSON.stringify({ type: 'warning', message: 'A game is already in progress — you can watch, then join the next one.' }));
+        broadcastRoomState(ALL_HANDS_ROOM);
+        return;
+      }
+      if (!allHandsPrizeInfo().active) {
+        ws.send(JSON.stringify({ type: 'error', message: 'All Hands on Deck is not available right now.' }));
+        return;
+      }
+      const seat = seatAllHandsHuman(room, userEmail, userName);
+      if (!seat) {
+        ws.send(JSON.stringify({ type: 'warning', message: 'The All Hands table is full.' }));
+        return;
+      }
+      room.status = 'betting';
+      setConnRoomForEmail(userEmail, ALL_HANDS_ROOM);
+      // Auto-start once humans alone fill the configured table size.
+      if (room.players.filter(p => !p.isBot).length >= clampAllHandsSize(allHandsSize)) {
+        startAllHands(room);
+      }
+      broadcastRoomState(ALL_HANDS_ROOM);
+      return;
+    }
+
+    // Fill remaining seats with bots and deal immediately (the "Play now" button).
+    if (msg.type === 'start-all-hands') {
+      const room = gameRooms[ALL_HANDS_ROOM];
+      if (!room || room.status === 'playing' || room.status === 'finished') return;
+      if (!room.players.some(p => p.id === userEmail && !p.isBot)) {
+        ws.send(JSON.stringify({ type: 'warning', message: 'Join the table before starting.' }));
+        return;
+      }
+      startAllHands(room);
+      broadcastRoomState(ALL_HANDS_ROOM);
       return;
     }
 
