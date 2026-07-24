@@ -1733,7 +1733,7 @@ wss.on('connection', async (ws: WebSocket, req) => {
   // the heartbeat below can drop truly dead connections.
   (ws as any).isAlive = true;
   ws.on('pong', () => { (ws as any).isAlive = true; });
-  const profile = await ensureProfile(userEmail);
+  await ensureProfile(userEmail); // load into cache
   const bracketLive = !!tournament && (tournament.status === 'registering' || tournament.status === 'running');
 
   if (bracketLive) {
@@ -1750,8 +1750,11 @@ wss.on('connection', async (ws: WebSocket, req) => {
       sendLobbyTo(userEmail);
     }
   } else {
-    // --- Casual arena path (no bracket running) -------------------------------
-    if (!isTournamentActive() && !isAdminEmail(userEmail)) {
+    // --- No bracket running ---------------------------------------------------
+    // All play now goes through the bracket (which scales to everyone, no 4-seat
+    // lockout). There is no casual single-table game. Non-admins can't enter;
+    // admins may connect (no game) so they can reach the dashboard to run one.
+    if (!isAdminEmail(userEmail)) {
       ws.send(JSON.stringify({
         type: 'error',
         message: 'No tournaments available right now. Please check back soon.',
@@ -1759,61 +1762,7 @@ wss.on('connection', async (ws: WebSocket, req) => {
       ws.close();
       return;
     }
-
-    const userRoomId = adminConfig.defaultRoomId;
-    activeConnections[connId] = { ws, email: userEmail, roomId: userRoomId };
-    const state = getOrCreateRoom(userRoomId);
-
-    let playerObj = state.players.find(p => p.id === userEmail);
-    if (!playerObj) {
-      if (state.players.length >= Math.min(Math.max(adminConfig.maxPlayers, 2), 4)) {
-        ws.send(JSON.stringify({
-          type: 'error',
-          message: 'This tournament table is full. Please try again shortly.'
-        }));
-        delete activeConnections[connId];
-        ws.close();
-        return;
-      }
-
-      const assignedColors: PlayerColor[] = state.players.map(p => p.color).filter(Boolean) as PlayerColor[];
-      const allColors: PlayerColor[] = ['red', 'green', 'yellow', 'blue'];
-      const availableColor = allColors.find(c => !assignedColors.includes(c)) || null;
-
-      playerObj = {
-        id: userEmail,
-        name: userName,
-        color: availableColor,
-        isBot: false,
-        balance: profile.balance,
-        currentBet: 0,
-        ready: false,
-        cardsCount: 0,
-        hand: [],
-        isConnected: true,
-        highestRollInRound: 0,
-        totalRollsCount: 0,
-      };
-      state.players.push(playerObj);
-
-      state.logs.push({
-        id: 'log_join_' + Date.now(),
-        message: `👤 ${userName} seated on the ${availableColor?.toUpperCase()} seat!`,
-        type: 'info',
-        timestamp: new Date().toISOString(),
-      });
-    } else {
-      playerObj.isConnected = true;
-      playerObj.name = userName;
-      state.logs.push({
-        id: 'log_reconnect_' + Date.now(),
-        message: `⚡ ${userName} reconnected.`,
-        type: 'info',
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    broadcastRoomState(userRoomId);
+    activeConnections[connId] = { ws, email: userEmail, roomId: TOURNEY_LOBBY };
   }
 
   ws.on('message', (messageStr: string) => {

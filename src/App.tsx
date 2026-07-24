@@ -376,15 +376,12 @@ export default function App() {
       return;
     }
 
-    // Otherwise: admins (dashboard) or casual play when a prize is set but no
-    // bracket exists.
-    if (!isAdmin && bracketPublic?.exists) return; // running bracket, can't join late
-    if (!config?.tournamentActive && !isAdmin) return;
-    const room = config?.roomName || roomId;
-    setRoomId(room);
-    savePrefs({ userName, roomId: room });
-    // Admins land straight on the dashboard (no game to play from the lobby).
-    if (isAdmin && (bracketPublic?.exists || !config?.tournamentActive)) setActiveTab('admin');
+    // Only admins can enter otherwise — to reach the dashboard and run a
+    // bracket. There is no casual single-table game anymore (it locked players
+    // out at 4). Everyone else plays by registering for a bracket above.
+    if (!isAdmin) return;
+    savePrefs({ userName, roomId: config?.roomName || roomId });
+    setActiveTab('admin');
     setIsJoined(true);
     connectWebSocket();
   };
@@ -546,7 +543,7 @@ export default function App() {
 
               <button
                 type="submit"
-                disabled={!(config?.isAdmin || bracketPublic?.open || (!bracketPublic?.exists && config?.tournamentActive))}
+                disabled={!(config?.isAdmin || bracketPublic?.open)}
                 className="w-full py-2.5 rounded-lg bg-neon-purple hover:bg-neon-purple/90 text-white font-mono font-bold text-xs transition-all tracking-wider shadow-[0_0_15px_rgba(157,78,221,0.3)] cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {config?.isAdmin
@@ -555,8 +552,6 @@ export default function App() {
                   ? 'Register for Tournament'
                   : bracketPublic?.status === 'running'
                   ? 'Tournament In Progress'
-                  : config?.tournamentActive
-                  ? 'Enter Arena'
                   : 'No Tournament Available'}
               </button>
             </form>
