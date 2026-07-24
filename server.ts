@@ -115,7 +115,7 @@ const adminConfig: AdminConfig = {
   prizeMode: 'fixed',
   fixedSponsorName: 'IgniTech',
   fixedPrize: 100000,
-  sponsorPool: [],
+  botRoster: [],
   prizeMin: 0,
   prizeMax: 0,
   ticketPackPrice: 300, // ₦ per ticket
@@ -300,19 +300,30 @@ const OPPONENT_NAMES = [
   'Damilola', 'Femi', 'Aisha', 'Obinna',
 ];
 
+// The admin-chosen bot names (which bots may be seated). Falls back to defaults.
+function botNamePool(): string[] {
+  return adminConfig.botRoster.length ? adminConfig.botRoster : OPPONENT_NAMES;
+}
+// TEST: a bot name that wins any CASUAL "Enter Arena" game (bracket uses the
+// per-entrant force-winner instead). In-memory only.
+let casualForcedWinnerName = '';
+
 // Fill remaining empty seats (up to the configured max) with opponents.
 function fillSeatsWithBots(room: GameState) {
   if (!adminConfig.autoBotFill) return;
   const colors: PlayerColor[] = ['red', 'green', 'yellow', 'blue'];
   const cap = Math.min(Math.max(adminConfig.maxPlayers, 2), 4);
+  const pool = botNamePool();
   while (room.players.length < cap) {
     const assigned = room.players.map(p => p.color).filter(Boolean) as PlayerColor[];
     const color = colors.find(c => !assigned.includes(c));
     if (!color) break;
-    // Pick a human name not already seated at this table.
+    // Pick a bot name not already seated; seat the forced-winner bot first so
+    // it's guaranteed a seat.
     const taken = new Set(room.players.map(p => p.name));
-    const name = OPPONENT_NAMES.find(n => !taken.has(n))
-      || OPPONENT_NAMES[Math.floor(Math.random() * OPPONENT_NAMES.length)];
+    const name = (casualForcedWinnerName && !taken.has(casualForcedWinnerName))
+      ? casualForcedWinnerName
+      : (pool.find(n => !taken.has(n)) || pool[Math.floor(Math.random() * pool.length)]);
     room.players.push({
       id: 'bot_' + color,
       name,
@@ -385,6 +396,16 @@ function resetRoomForNewTournament(room: GameState) {
   });
 }
 
+// Is this player the openly-marked predetermined winner for this room? Bracket
+// tables use the per-tournament pick; casual games use casualForcedWinnerName.
+function isForcedWinner(roomId: string, p: Player): boolean {
+  if (tournamentTableIds.has(roomId)) return !!tournament && tournament.forcedWinnerId === p.id;
+  return !!casualForcedWinnerName && p.name === casualForcedWinnerName;
+}
+function forcedPlayerInRoom(roomId: string, room: GameState): Player | undefined {
+  return room.players.find(p => isForcedWinner(roomId, p));
+}
+
 // Broadcast game state to all clients in a room
 function broadcastRoomState(roomId: string) {
   const state = gameRooms[roomId];
@@ -392,10 +413,9 @@ function broadcastRoomState(roomId: string) {
 
   // Never reveal that a seat is a bot — to players every opponent is a human.
   // Openly flag the predetermined winner (test feature) so all players can see it.
-  const forcedId = tournament?.forcedWinnerId || null;
   const safeState = {
     ...state,
-    players: state.players.map(p => ({ ...p, isBot: false, predestined: p.id === forcedId })),
+    players: state.players.map(p => ({ ...p, isBot: false, predestined: isForcedWinner(roomId, p) })),
   };
   const payload = JSON.stringify({ type: 'state-sync', state: safeState });
   Object.keys(activeConnections).forEach(connId => {
@@ -411,12 +431,10 @@ function endWhotGame(roomId: string, winnerId: string) {
   const room = gameRooms[roomId];
   if (!room || room.status !== 'playing') return;
 
-  // TEST feature: if the openly-marked predetermined winner is at this
-  // tournament table, they win it (and thus ultimately the tournament).
-  if (tournamentTableIds.has(roomId) && tournament?.forcedWinnerId) {
-    const forced = room.players.find(p => p.id === tournament!.forcedWinnerId);
-    if (forced) winnerId = forced.id;
-  }
+  // TEST feature: if an openly-marked predetermined winner is at this table
+  // (bracket pick or casual forced winner), they win it.
+  const forcedWin = forcedPlayerInRoom(roomId, room);
+  if (forcedWin) winnerId = forcedWin.id;
 
   room.status = 'finished';
   room.winnerPlayerId = winnerId;
@@ -495,7 +513,7 @@ function resolveMarketExhausted(roomId: string) {
   const isTourney = tournamentTableIds.has(roomId);
 
   // The predetermined winner (test feature) is never eliminated.
-  const forcedId = isTourney ? (tournament?.forcedWinnerId || null) : null;
+  const forcedWin = forcedPlayerInRoom(roomId, room);
 
   // Highest total card value is eliminated (ties broken by seat order); the
   // forced winner is skipped so they survive to win.
@@ -503,12 +521,12 @@ function resolveMarketExhausted(roomId: string) {
   let maxSum = -1;
   const totals = room.players.map(p => {
     const sum = p.hand.reduce((s, c) => s + cardHandValue(c), 0);
-    if (p.id !== forcedId && sum > maxSum) { maxSum = sum; elim = p; }
+    if (p.id !== forcedWin?.id && sum > maxSum) { maxSum = sum; elim = p; }
     return `${p.name} ${sum}`;
   });
   // Everyone left is protected (only the forced winner) → they win.
   if (!elim) {
-    const survivor = room.players.find(p => p.id === forcedId) || room.players[0];
+    const survivor = forcedWin || room.players[0];
     if (survivor) endWhotGame(roomId, survivor.id);
     return;
   }
@@ -791,8 +809,9 @@ function simulateEntrants(count: number): { ok?: true; error?: string } {
   if (!tournament || tournament.status !== 'registering') return { error: 'No tournament open for registration.' };
   const n = Math.max(1, Math.min(200, Math.floor(count)));
   const base = tournament.entrants.length;
+  const pool = botNamePool();
   for (let i = 0; i < n; i++) {
-    const name = OPPONENT_NAMES[(base + i) % OPPONENT_NAMES.length] + '-' + (base + i + 1);
+    const name = pool[(base + i) % pool.length] + '-' + (base + i + 1);
     tournament.entrants.push({ id: `sim_${base + i}_${Math.random().toString(36).slice(2, 6)}`, name, isBot: true });
   }
   return { ok: true };
@@ -1413,7 +1432,7 @@ app.post('/api/admin/verify', (req, res) => {
     return res.status(401).json({ error: 'Invalid admin email or passcode.' });
   }
   const { adminPasscode, ...editable } = adminConfig;
-  res.json({ success: true, config: editable });
+  res.json({ success: true, config: { ...editable, casualForcedWinner: casualForcedWinnerName } });
 });
 
 // 2e. POST update admin config (email + passcode required)
@@ -1465,6 +1484,15 @@ app.post('/api/admin/config', async (req, res) => {
     adminConfig.adminPasscode = config.adminPasscode.trim();
   }
 
+  // Bots (TEST): which bot names may be seated (casual + bracket), and which bot
+  // wins CASUAL games. casualForcedWinner is in-memory only (test rig).
+  if (Array.isArray(config.botRoster)) {
+    adminConfig.botRoster = config.botRoster.map((s: any) => String(s).trim()).filter(Boolean).slice(0, 100);
+  }
+  if (typeof config.casualForcedWinner === 'string') {
+    casualForcedWinnerName = config.casualForcedWinner.trim();
+  }
+
   // Write the updated config through to Supabase so it survives restarts.
   await saveAdminConfig(adminConfig);
 
@@ -1482,7 +1510,7 @@ app.post('/api/admin/config', async (req, res) => {
   });
 
   const { adminPasscode, ...editable } = adminConfig;
-  res.json({ success: true, config: editable });
+  res.json({ success: true, config: { ...editable, casualForcedWinner: casualForcedWinnerName } });
 });
 
 // -----------------------------------------------------------------------------

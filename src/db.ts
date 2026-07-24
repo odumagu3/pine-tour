@@ -29,7 +29,7 @@ export interface AdminConfig {
   prizeMode: 'fixed' | 'random';
   fixedSponsorName: string;
   fixedPrize: number;
-  sponsorPool: string[];
+  botRoster: string[]; // stored in the legacy sponsor_pool column
   prizeMin: number;
   prizeMax: number;
   ticketPackPrice: number;
@@ -49,7 +49,7 @@ function rowToAdminConfig(r: any): AdminConfig {
     prizeMode: r.prize_mode === 'fixed' ? 'fixed' : 'random',
     fixedSponsorName: r.fixed_sponsor_name,
     fixedPrize: Number(r.fixed_prize),
-    sponsorPool: r.sponsor_pool ?? [],
+    botRoster: r.sponsor_pool ?? [],
     prizeMin: Number(r.prize_min),
     prizeMax: Number(r.prize_max),
     ticketPackPrice: Number(r.ticket_pack_price),
@@ -78,7 +78,7 @@ export async function saveAdminConfig(c: AdminConfig): Promise<void> {
     prize_mode: c.prizeMode,
     fixed_sponsor_name: c.fixedSponsorName,
     fixed_prize: c.fixedPrize,
-    sponsor_pool: c.sponsorPool,
+    sponsor_pool: c.botRoster,
     prize_min: c.prizeMin,
     prize_max: c.prizeMax,
     ticket_pack_price: c.ticketPackPrice,

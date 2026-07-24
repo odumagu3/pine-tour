@@ -49,6 +49,8 @@ interface EditableConfig {
   sponsorName: string;   // tournament sponsor ('' = no tournament)
   sponsorPrize: number;  // tournament cash prize
   fieldSize: number;     // seats the bracket auto-fills to (multiple of 4)
+  botRosterText: string; // comma-separated bot names used to fill seats
+  casualForcedWinner: string; // bot name that wins casual "Enter Arena" games
   ticketPrice: number;   // price per ticket
   freeGameEnabled: boolean;
   turnTimerSeconds: number;
@@ -76,6 +78,8 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     sponsorName: c.sponsorName ?? c.fixedSponsorName ?? '',
     sponsorPrize: Number(c.sponsorPrize ?? c.fixedPrize ?? 0),
     fieldSize: Number(c.tournamentFieldSize ?? 16),
+    botRosterText: Array.isArray(c.botRoster) ? c.botRoster.join(', ') : '',
+    casualForcedWinner: c.casualForcedWinner ?? '',
     ticketPrice: Number(c.ticketPrice ?? c.ticketPackPrice ?? 0),
     freeGameEnabled: !!c.freeGameEnabled,
     turnTimerSeconds: Number(c.turnTimerSeconds ?? 20),
@@ -124,6 +128,8 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
       sponsorName: form.sponsorName.trim(),
       sponsorPrize: form.sponsorPrize,
       tournamentFieldSize: form.fieldSize,
+      botRoster: form.botRosterText.split(',').map(s => s.trim()).filter(Boolean),
+      casualForcedWinner: form.casualForcedWinner.trim(),
       ticketPrice: form.ticketPrice,
       freeGameEnabled: form.freeGameEnabled,
       turnTimerSeconds: form.turnTimerSeconds,
@@ -341,6 +347,44 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
           </div>
         </div>
         <Toggle value={form.autoBotFill} onChange={(v) => update('autoBotFill', v)} label="Auto-fill empty seats with AI opponents" />
+      </Section>
+
+      {/* Bots + casual rigging (TEST) */}
+      <Section icon={<Gamepad2 className="w-4 h-4" />} title="Bots — TEST">
+        <div>
+          <label className={labelCls}>Bot Roster (comma-separated names)</label>
+          <textarea
+            className={`${field} h-16 resize-none`}
+            value={form.botRosterText}
+            placeholder="Chidi, Amara, Tunde, Zainab, Emeka…"
+            onChange={(e) => update('botRosterText', e.target.value)}
+          />
+          <p className="text-[10px] text-slate-500 font-mono mt-1">These bots fill empty seats in both the casual game and the bracket. Leave blank for the defaults.</p>
+        </div>
+        {(() => {
+          const roster = form.botRosterText.split(',').map(s => s.trim()).filter(Boolean);
+          return (
+            <div>
+              <label className={labelCls}>Casual game — predetermined winner</label>
+              <input
+                className={field}
+                value={form.casualForcedWinner}
+                placeholder="Type or tap a bot name"
+                onChange={(e) => update('casualForcedWinner', e.target.value)}
+              />
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                <button type="button" onClick={() => update('casualForcedWinner', '')} className={`px-2 py-0.5 rounded text-[10px] font-mono border ${!form.casualForcedWinner ? 'border-slate-600 bg-slate-800 text-white' : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-white'}`}>None</button>
+                {roster.map(n => (
+                  <button key={n} type="button" onClick={() => update('casualForcedWinner', n)} className={`px-2 py-0.5 rounded text-[10px] font-mono border ${form.casualForcedWinner === n ? 'border-amber-500 bg-amber-500/15 text-amber-200' : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:border-amber-500/50'}`}>
+                    {form.casualForcedWinner === n && '👑 '}{n}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-slate-500 font-mono mt-1">This bot wins any casual “Enter Arena” game and is openly marked to players. (Bracket winner is picked in the Live Tournament panel.)</p>
+            </div>
+          );
+        })()}
+        <p className="text-[9px] text-amber-500/80 font-mono">⚠️ Turn these off before real players/payments.</p>
       </Section>
 
       {/* Access control */}
