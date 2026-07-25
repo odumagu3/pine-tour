@@ -12,6 +12,7 @@ interface WithdrawalRequest {
   bankName: string;
   accountNumber: string;
   accountName: string;
+  nameVerified: boolean;
   status: 'pending' | 'paid' | 'rejected';
   createdAt: string;
 }
@@ -760,6 +761,19 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[10px] font-mono text-slate-500">Account name</span>
                     <span className="text-[11px] font-mono text-white truncate">{w.accountName || '—'}</span>
+                  </div>
+                  {/* Whether the BANK confirmed this name, or the player typed it */}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-mono text-slate-500">Name check</span>
+                    {w.nameVerified ? (
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-neon-green/10 text-neon-green border border-neon-green/30">
+                        CONFIRMED BY BANK
+                      </span>
+                    ) : (
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/40">
+                        ⚠ NOT VERIFIED — CHECK FIRST
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[10px] font-mono text-slate-500">Account number</span>

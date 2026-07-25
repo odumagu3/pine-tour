@@ -1943,15 +1943,106 @@ app.post('/api/paystack/webhook', async (req, res) => {
   }
 });
 
-// Resolve a bank account (for withdrawals) — returns the account holder's name.
-const NG_NAME_POOL = ['CHIDI OKAFOR', 'AMARA NWOSU', 'TUNDE ADEYEMI', 'ZAINAB BELLO', 'EMEKA ELEZE', 'NGOZI EZE', 'YUSUF IBRAHIM', 'FUNKE ADEBAYO', 'MUSA ALIYU', 'BLESSING OKON'];
-app.post('/api/paystack/resolve-account', (req, res) => {
-  const { accountNumber, bank } = req.body;
+// -----------------------------------------------------------------------------
+// Bank list + account name resolution.
+//
+// Account name lookup is a NIP name enquiry under the hood — a regulated
+// capability, so Paystack only enables it for LIVE keys on an activated
+// business. In test mode it refuses, whatever bank code you send.
+//
+// This code used to paper over that by inventing a plausible Nigerian name from
+// a hardcoded pool, keyed off a hash of the digits. That is worse than showing
+// nothing: the player sees a confident name and believes their account was
+// checked, and so does whoever pays the withdrawal. Now the name is either
+// genuinely from the bank, or it is marked unverified. Never invented.
+// -----------------------------------------------------------------------------
+
+// Minimal fallback so withdrawals still work if Paystack is unreachable. These
+// are real NIP codes taken from Paystack's own list.
+const FALLBACK_BANKS = [
+  { name: 'Access Bank', code: '044' },
+  { name: 'Access Bank (Diamond)', code: '063' },
+  { name: 'Ecobank Nigeria', code: '050' },
+  { name: 'Fidelity Bank', code: '070' },
+  { name: 'First Bank of Nigeria', code: '011' },
+  { name: 'First City Monument Bank', code: '214' },
+  { name: 'Guaranty Trust Bank', code: '058' },
+  { name: 'Kuda Bank', code: '50211' },
+  { name: 'Moniepoint MFB', code: '50515' },
+  { name: 'OPay Digital Services Limited (OPay)', code: '999992' },
+  { name: 'PalmPay', code: '999991' },
+  { name: 'Stanbic IBTC Bank', code: '221' },
+  { name: 'Sterling Bank', code: '232' },
+  { name: 'Union Bank of Nigeria', code: '032' },
+  { name: 'United Bank For Africa', code: '033' },
+  { name: 'Wema Bank', code: '035' },
+  { name: 'Zenith Bank', code: '057' },
+];
+
+// The list changes rarely; cache it for a day rather than hitting Paystack on
+// every page load.
+let bankCache: { at: number; banks: { name: string; code: string }[] } | null = null;
+const BANK_CACHE_MS = 24 * 60 * 60 * 1000;
+
+async function getBanks(): Promise<{ name: string; code: string }[]> {
+  if (bankCache && Date.now() - bankCache.at < BANK_CACHE_MS) return bankCache.banks;
+  if (!paystackEnabled) return FALLBACK_BANKS;
+  try {
+    const out = await paystackGet('/bank?currency=NGN');
+    const banks = (out?.data ?? [])
+      .filter((b: any) => b?.name && b?.code)
+      .map((b: any) => ({ name: String(b.name), code: String(b.code) }))
+      .sort((a: any, b: any) => a.name.localeCompare(b.name));
+    if (!banks.length) return bankCache?.banks ?? FALLBACK_BANKS;
+    bankCache = { at: Date.now(), banks };
+    return banks;
+  } catch (e) {
+    console.error('Bank list fetch failed:', e);
+    return bankCache?.banks ?? FALLBACK_BANKS;
+  }
+}
+
+// Ask the bank who owns an account. Returns null when the lookup is
+// unavailable (test mode, unactivated business, NIBSS outage) — the caller must
+// then treat the name as unverified rather than making one up.
+async function resolveAccountName(accountNumber: string, bankCode: string): Promise<string | null> {
+  if (!paystackEnabled || !bankCode) return null;
+  try {
+    const out = await paystackGet(
+      `/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`,
+    );
+    const name = out?.status ? String(out?.data?.account_name || '').trim() : '';
+    return name || null;
+  } catch (e) {
+    console.error('Account resolve failed:', e);
+    return null;
+  }
+}
+
+// The bank dropdown.
+app.get('/api/banks', async (_req, res) => {
+  res.json({ status: true, banks: await getBanks() });
+});
+
+// Look up the account holder's name.
+app.post('/api/paystack/resolve-account', async (req, res) => {
+  const { accountNumber, bankCode } = req.body;
   const acct = String(accountNumber || '').replace(/\D/g, '');
-  if (acct.length !== 10) return res.status(400).json({ status: false, error: 'Account number must be 10 digits.' });
-  // Deterministic pseudo-name so the same number always resolves the same way.
-  const name = NG_NAME_POOL[parseInt(acct.slice(-2), 10) % NG_NAME_POOL.length];
-  res.json({ status: true, data: { account_number: acct, account_name: name, bank_name: bank || '' } });
+  if (acct.length !== 10) {
+    return res.status(400).json({ status: false, error: 'Account number must be 10 digits.' });
+  }
+
+  const name = await resolveAccountName(acct, String(bankCode || ''));
+  if (!name) {
+    // Honest failure. The client asks the player to type the name and flags it.
+    return res.json({
+      status: false,
+      verified: false,
+      error: 'We could not confirm this account name with the bank. Enter the account name exactly as it appears on your statement.',
+    });
+  }
+
+  res.json({ status: true, verified: true, data: { account_number: acct, account_name: name } });
 });
 
 // 2b. POST Buy tournament tickets — any quantity between MIN_TICKETS and
@@ -2443,11 +2534,19 @@ app.post('/api/profile/withdraw', async (req, res) => {
 
   // Bank details are what make the request payable — without them an admin has
   // nowhere to send the money. Previously they were received and discarded.
-  const { bank, accountNumber, accountName } = req.body;
+  const { bank, bankCode, accountNumber, accountName } = req.body;
   const acct = String(accountNumber || '').replace(/\D/g, '');
   if (acct.length !== 10 || !String(accountName || '').trim()) {
-    return res.status(400).json({ error: 'A resolved 10-digit bank account is required.' });
+    return res.status(400).json({ error: 'A 10-digit bank account and account name are required.' });
   }
+
+  // Resolve again here rather than trusting whatever the client said was
+  // verified — otherwise a tampered client could mark an invented name as
+  // bank-confirmed and an admin would pay it. When the bank answers, its name
+  // wins over anything typed.
+  const resolvedName = await resolveAccountName(acct, String(bankCode || ''));
+  const finalName = resolvedName || String(accountName).trim();
+  const nameVerified = !!resolvedName;
 
   const txId = generateHash();
   const txHash = 'WD_' + Math.random().toString(36).substring(2, 12);
@@ -2474,8 +2573,10 @@ app.post('/api/profile/withdraw', async (req, res) => {
     email: String(email).toLowerCase().trim(),
     amount: parseFloat(amount),
     bankName: String(bank || ''),
+    bankCode: String(bankCode || ''),
     accountNumber: acct,
-    accountName: String(accountName).trim(),
+    accountName: finalName,
+    nameVerified,
     transactionId: txId,
   });
 

@@ -234,8 +234,10 @@ export interface WithdrawalRow {
   email: string;
   amount: number;
   bankName: string;
+  bankCode: string;
   accountNumber: string;
   accountName: string;
+  nameVerified: boolean; // true only when the bank itself returned this name
   status: 'pending' | 'paid' | 'rejected';
   note: string;
   transactionId: string | null;
@@ -249,8 +251,10 @@ function rowToWithdrawal(r: any): WithdrawalRow {
     email: r.email,
     amount: Number(r.amount),
     bankName: r.bank_name ?? '',
+    bankCode: r.bank_code ?? '',
     accountNumber: r.account_number ?? '',
     accountName: r.account_name ?? '',
+    nameVerified: !!r.name_verified,
     status: r.status,
     note: r.note ?? '',
     transactionId: r.transaction_id ?? null,
@@ -260,16 +264,19 @@ function rowToWithdrawal(r: any): WithdrawalRow {
 }
 
 export async function createWithdrawal(w: {
-  email: string; amount: number; bankName: string; accountNumber: string;
-  accountName: string; transactionId: string;
+  email: string; amount: number; bankName: string; bankCode: string;
+  accountNumber: string; accountName: string; nameVerified: boolean;
+  transactionId: string;
 }): Promise<WithdrawalRow | null> {
   if (!persistenceEnabled) return null;
   const { data, error } = await supabase.from('withdrawals').insert({
     email: w.email.toLowerCase().trim(),
     amount: w.amount,
     bank_name: w.bankName,
+    bank_code: w.bankCode,
     account_number: w.accountNumber,
     account_name: w.accountName,
+    name_verified: w.nameVerified,
     transaction_id: w.transactionId,
   }).select('*').maybeSingle();
   if (error) { console.error('createWithdrawal failed:', error.message); return null; }

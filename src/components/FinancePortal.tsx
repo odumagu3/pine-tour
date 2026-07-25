@@ -7,8 +7,9 @@ import { apiUrl } from '../config.js';
 import ReferralPanel from './ReferralPanel.tsx';
 import { openPaystackCheckout } from '../paystack.js';
 
-// Nigerian banks for the Paystack payout (withdrawal) flow.
-const NG_BANKS = ['Access Bank', 'GTBank', 'Zenith Bank', 'UBA', 'First Bank', 'Kuda', 'OPay', 'PalmPay', 'Fidelity Bank', 'Union Bank', 'Wema Bank', 'Sterling Bank'];
+// The bank list is fetched from the server (Paystack's real list, with NIP
+// codes) rather than hardcoded — resolving an account needs the code, not a
+// display name, and the old 12-name list had no codes at all.
 
 interface FinancePortalProps {
   profile: UserProfile;
@@ -42,9 +43,14 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
   // went and tries paying again.
   const [awaitingCredit, setAwaitingCredit] = useState<number | null>(null);
 
-  // Withdrawal States — Paystack transfer to a Nigerian bank account.
+  // Withdrawal States — payout to a Nigerian bank account.
+  const [banks, setBanks] = useState<{ name: string; code: string }[]>([]);
+  const [withdrawBankCode, setWithdrawBankCode] = useState('');
+  // True only when the BANK returned this name, never when the player typed it.
+  const [nameVerified, setNameVerified] = useState(false);
+  const [resolveNote, setResolveNote] = useState('');
   const [withdrawAmount, setWithdrawAmount] = useState('2000');
-  const [withdrawBank, setWithdrawBank] = useState(NG_BANKS[0]);
+  const [withdrawBank, setWithdrawBank] = useState('');
   const [withdrawAccount, setWithdrawAccount] = useState('');
   const [withdrawAccountName, setWithdrawAccountName] = useState('');
   const [resolving, setResolving] = useState(false);
@@ -164,6 +170,22 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [awaitingCredit, profile.balance]);
 
+  // Load the real bank list (with NIP codes) once.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(apiUrl('/api/banks'));
+        const data = await res.json();
+        if (cancelled || !data?.banks?.length) return;
+        setBanks(data.banks);
+        setWithdrawBank(prev => prev || data.banks[0].name);
+        setWithdrawBankCode(prev => prev || data.banks[0].code);
+      } catch { /* the select stays empty; the form blocks on a missing bank */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // Drop the deposit success screen back to the form after a moment, wherever
   // it was set from.
   useEffect(() => {
@@ -249,23 +271,32 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
     }
   };
 
-  // Resolve the bank account number → account holder name (Paystack-style).
-  const resolveAccount = async (acct: string, bank: string) => {
+  // Ask the bank who owns this account. When the bank answers we lock the name
+  // in and mark it confirmed; when it can't, we do NOT guess — the player types
+  // the name and it travels to the admin flagged as unverified.
+  const resolveAccount = async (acct: string, code: string) => {
     const digits = acct.replace(/\D/g, '');
-    if (digits.length !== 10) { setWithdrawAccountName(''); return; }
+    if (digits.length !== 10) { setWithdrawAccountName(''); setNameVerified(false); return; }
     setResolving(true);
     setWithdrawError('');
+    setResolveNote('');
     try {
       const res = await fetch(apiUrl(`/api/paystack/resolve-account`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountNumber: digits, bank }),
+        body: JSON.stringify({ accountNumber: digits, bankCode: code }),
       });
       const data = await res.json();
-      if (res.ok && data.status) setWithdrawAccountName(data.data.account_name);
-      else { setWithdrawAccountName(''); setWithdrawError(data.error || 'Could not resolve account.'); }
+      if (res.ok && data.status && data.verified) {
+        setWithdrawAccountName(data.data.account_name);
+        setNameVerified(true);
+      } else {
+        setNameVerified(false);
+        setResolveNote(data.error || 'We could not confirm this account name with the bank.');
+      }
     } catch {
-      setWithdrawAccountName('');
+      setNameVerified(false);
+      setResolveNote('Could not reach the bank lookup. Enter the account name yourself.');
     } finally {
       setResolving(false);
     }
@@ -279,10 +310,15 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
     const amt = parseFloat(withdrawAmount);
     if (isNaN(amt) || amt <= 0) { setWithdrawError('Please specify a valid withdrawal amount.'); return; }
     if (profile.balance < amt) { setWithdrawError('Insufficient ledger balance.'); return; }
-    if (withdrawAccount.replace(/\D/g, '').length !== 10 || !withdrawAccountName) {
-      setWithdrawError('Enter a valid 10-digit account number to resolve the account name.');
+    if (withdrawAccount.replace(/\D/g, '').length !== 10) {
+      setWithdrawError('Enter a valid 10-digit account number.');
       return;
     }
+    if (!withdrawAccountName.trim()) {
+      setWithdrawError('Enter the account name exactly as it appears on your bank statement.');
+      return;
+    }
+    if (!withdrawBankCode) { setWithdrawError('Choose your bank.'); return; }
     if (!withdrawPin) { setWithdrawError('Security Transaction PIN is required.'); return; }
 
     setWithdrawStatus('processing');
@@ -296,10 +332,11 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
         body: JSON.stringify({
           email: profile.email,
           amount: amt,
-          method: `Paystack • ${withdrawBank} ••${last4}`,
+          method: `${withdrawBank} ••${last4}`,
           bank: withdrawBank,
+          bankCode: withdrawBankCode,
           accountNumber: withdrawAccount.replace(/\D/g, ''),
-          accountName: withdrawAccountName,
+          accountName: withdrawAccountName.trim(),
           pin: withdrawPin,
         }),
       });
@@ -727,16 +764,23 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                     />
                   </div>
 
-                  {/* Paystack transfer — bank + account, auto-resolves the name */}
+                  {/* Bank + account. The name comes from the bank when it can. */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs font-mono text-slate-400 mb-2">Bank</label>
                       <select
-                        value={withdrawBank}
-                        onChange={(e) => { setWithdrawBank(e.target.value); if (withdrawAccount.replace(/\D/g, '').length === 10) resolveAccount(withdrawAccount, e.target.value); }}
+                        value={withdrawBankCode}
+                        onChange={(e) => {
+                          const code = e.target.value;
+                          setWithdrawBankCode(code);
+                          setWithdrawBank(banks.find(b => b.code === code)?.name || '');
+                          setNameVerified(false);
+                          if (withdrawAccount.replace(/\D/g, '').length === 10) resolveAccount(withdrawAccount, code);
+                        }}
                         className="w-full bg-slate-900 border border-slate-800 rounded-lg py-2.5 px-3 font-mono text-xs text-white focus:outline-none"
                       >
-                        {NG_BANKS.map(b => <option key={b} value={b}>{b}</option>)}
+                        {!banks.length && <option value="">Loading banks…</option>}
+                        {banks.map(b => <option key={b.code} value={b.code}>{b.name}</option>)}
                       </select>
                     </div>
 
@@ -751,7 +795,9 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                           const v = e.target.value.replace(/\D/g, '').slice(0, 10);
                           setWithdrawAccount(v);
                           setWithdrawAccountName('');
-                          if (v.length === 10) resolveAccount(v, withdrawBank);
+                          setNameVerified(false);
+                          setResolveNote('');
+                          if (v.length === 10) resolveAccount(v, withdrawBankCode);
                         }}
                         placeholder="0123456789"
                         className="w-full bg-slate-900 border border-slate-800 rounded-lg py-2.5 px-3 font-mono text-xs text-white focus:outline-none focus:border-neon-cyan/60"
@@ -760,16 +806,39 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                     </div>
                   </div>
 
-                  {/* Resolved account name */}
-                  {(resolving || withdrawAccountName) && (
-                    <div className="flex items-center gap-2 text-xs font-mono px-1">
-                      {resolving ? (
-                        <><Loader2 className="w-3.5 h-3.5 animate-spin text-slate-400" /> <span className="text-slate-400">Resolving account…</span></>
-                      ) : (
-                        <><CheckCircle2 className="w-3.5 h-3.5 text-neon-green" /> <span className="text-neon-green font-bold uppercase">{withdrawAccountName}</span></>
-                      )}
-                    </div>
-                  )}
+                  {/* Account name: confirmed by the bank, or typed by the player */}
+                  <div>
+                    <label className="block text-xs font-mono text-slate-400 mb-2">Account Name</label>
+                    {resolving ? (
+                      <div className="flex items-center gap-2 text-xs font-mono px-1 py-2.5">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-400" />
+                        <span className="text-slate-400">Checking with the bank…</span>
+                      </div>
+                    ) : nameVerified ? (
+                      <div className="flex items-center gap-2 bg-neon-green/5 border border-neon-green/30 rounded-lg py-2.5 px-3">
+                        <CheckCircle2 className="w-4 h-4 text-neon-green flex-shrink-0" />
+                        <span className="text-xs font-mono font-bold uppercase text-neon-green">{withdrawAccountName}</span>
+                        <span className="text-[9px] font-mono text-neon-green/70 ml-auto">CONFIRMED BY BANK</span>
+                      </div>
+                    ) : (
+                      <>
+                        <input
+                          type="text"
+                          value={withdrawAccountName}
+                          onChange={(e) => setWithdrawAccountName(e.target.value)}
+                          placeholder="Name exactly as it appears on your statement"
+                          className="w-full bg-slate-900 border border-amber-500/40 rounded-lg py-2.5 px-3 font-mono text-xs text-white focus:outline-none focus:border-amber-500/70"
+                          required
+                        />
+                        {resolveNote && (
+                          <p className="text-[10px] font-mono text-amber-500/90 mt-1.5 flex items-start gap-1.5">
+                            <AlertCircle className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                            <span>{resolveNote} Double-check it — payouts go to the account you enter.</span>
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
 
                   <div>
                     <label className="block text-xs font-mono text-slate-400 mb-2">Withdrawal PIN</label>
@@ -854,7 +923,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
 
                   <button
                     type="submit"
-                    disabled={resolving || !withdrawAccountName}
+                    disabled={resolving || !withdrawAccountName.trim() || !withdrawBankCode}
                     className="w-full py-3 rounded-lg font-bold text-sm cursor-pointer transition-opacity hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-2"
                     style={{ background: '#0BA4DB', color: '#fff' }}
                   >
