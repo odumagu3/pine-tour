@@ -37,6 +37,7 @@ interface AllHandsTable {
   tables: AllHandsTableRow[];
   adminStart: boolean;
   forcedWinner: string;
+  botRoster: string[];
   prizeActive: boolean;
   prize: number;
   sponsorName: string;
@@ -179,6 +180,31 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked, passcode]);
+
+  // Place / remove a specific bot at a table before it starts.
+  const addBot = async (roomId: string, name: string) => {
+    setAhError('');
+    const { ok, data } = await adminPost('/api/admin/all-hands/add-bot', { roomId, name });
+    if (!ok) setAhError(data.error || 'Could not seat that bot.');
+    await loadAhTable();
+  };
+
+  const removeBot = async (roomId: string, name: string) => {
+    setAhError('');
+    const { ok, data } = await adminPost('/api/admin/all-hands/remove-bot', { roomId, name });
+    if (!ok) setAhError(data.error || 'Could not remove that bot.');
+    await loadAhTable();
+  };
+
+  // Set the winner by name — works for a seated player OR a roster bot that
+  // isn't seated yet (it gets a guaranteed seat when a table starts).
+  const pickWinner = async (name: string) => {
+    setAhError('');
+    const { ok, data } = await adminPost('/api/admin/all-hands/winner', { name });
+    if (!ok) setAhError(data.error || 'Could not set the winner.');
+    update('allHandsForcedWinner', name);
+    await loadAhTable();
+  };
 
   const startAllHands = async (roomId: string) => {
     setAhStarting(roomId);
@@ -620,11 +646,33 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
             </span>
             <button
               type="button"
-              onClick={() => setAllHandsWinner('').then(loadAhTable)}
+              onClick={() => pickWinner('')}
               className="text-[10px] font-mono text-slate-400 hover:text-white cursor-pointer flex-shrink-0 ml-2"
             >
               Clear
             </button>
+          </div>
+        )}
+
+        {/* Pick any roster bot as the winner, seated or not. An unseated bot is
+            given a guaranteed seat on whichever table starts next. */}
+        {!!ahTable?.botRoster?.length && (
+          <div>
+            <span className="text-[10px] font-mono text-slate-500 uppercase block mb-1.5">
+              Make a bot the winner (seats itself when a table starts)
+            </span>
+            <div className="flex flex-wrap gap-1">
+              {ahTable.botRoster.map(n => (
+                <button
+                  key={`rosterwin-${n}`}
+                  type="button"
+                  onClick={() => pickWinner(n)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono border ${ahTable.forcedWinner === n ? 'border-amber-500 bg-amber-500/15 text-amber-200' : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:border-amber-500/50'}`}
+                >
+                  {ahTable.forcedWinner === n && '✓ '}{n}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
@@ -669,13 +717,51 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
                             ? <span className="text-[9px] font-mono text-slate-600 ml-1.5">AI</span>
                             : <span className="text-[9px] font-mono text-slate-600 ml-1.5 truncate">{p.email}</span>}
                         </div>
-                        {ahTable.forcedWinner === p.name && (
-                          <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/40 flex-shrink-0">
-                            WILL WIN
-                          </span>
-                        )}
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          {ahTable.forcedWinner === p.name && (
+                            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/40">
+                              WILL WIN
+                            </span>
+                          )}
+                          {p.isBot && t.status !== 'playing' && (
+                            <button
+                              type="button"
+                              onClick={() => removeBot(t.roomId, p.name)}
+                              title="Remove this bot"
+                              className="text-[10px] font-mono text-slate-500 hover:text-red-400 cursor-pointer px-1"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {/* Seat a specific bot at THIS table */}
+                {t.status !== 'playing' && t.players.length < ahTable.seats && (
+                  <div>
+                    <span className="text-[10px] font-mono text-slate-500 uppercase block mb-1.5">
+                      Add a bot to table {t.table}
+                    </span>
+                    <div className="flex flex-wrap gap-1">
+                      {ahTable.botRoster
+                        .filter(n => !t.players.some(p => p.name === n))
+                        .map(n => (
+                          <button
+                            key={`addbot-${t.roomId}-${n}`}
+                            type="button"
+                            onClick={() => addBot(t.roomId, n)}
+                            className="px-2 py-0.5 rounded text-[10px] font-mono border border-slate-800 bg-slate-900/40 text-slate-300 hover:border-neon-cyan/50 hover:text-neon-cyan cursor-pointer"
+                          >
+                            + {n}
+                          </button>
+                        ))}
+                      {!ahTable.botRoster.filter(n => !t.players.some(p => p.name === n)).length && (
+                        <span className="text-[10px] font-mono text-slate-600">Every roster bot is already seated here.</span>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -690,7 +776,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
                         <button
                           key={`pick-${t.roomId}-${p.name}-${i}`}
                           type="button"
-                          onClick={() => setAllHandsWinner(p.name).then(loadAhTable)}
+                          onClick={() => pickWinner(p.name)}
                           className={`px-2 py-0.5 rounded text-[10px] font-mono border ${ahTable.forcedWinner === p.name ? 'border-amber-500 bg-amber-500/15 text-amber-200' : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:border-amber-500/50'}`}
                         >
                           {ahTable.forcedWinner === p.name && '✓ '}{p.name}

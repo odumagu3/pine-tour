@@ -1166,40 +1166,77 @@ function pruneAllHandsTables(): void {
   }
 }
 
+// Seat ONE named bot at a table. Returns null when the table is full or that
+// name is already sitting there. Used both by the auto-fill below and by the
+// admin panel placing a specific bot by hand.
+function seatAllHandsBot(room: GameState, name: string): Player | null {
+  const clean = (name || '').trim();
+  if (!clean) return null;
+  if (room.players.some(p => p.name === clean)) return null;
+
+  const colors: PlayerColor[] = ['red', 'green', 'yellow', 'blue'];
+  const assigned = room.players.map(p => p.color).filter(Boolean) as PlayerColor[];
+  const color = colors.find(c => !assigned.includes(c));
+  if (!color) return null; // table full
+
+  const bot: Player = {
+    id: 'bot_' + color,
+    name: clean,
+    color,
+    isBot: true,
+    balance: 0,
+    currentBet: 0,
+    ready: true,
+    cardsCount: 0,
+    hand: [],
+    isConnected: true,
+    highestRollInRound: 0,
+    totalRollsCount: 0,
+  };
+  room.players.push(bot);
+  room.logs.push({
+    id: 'log_ah_join_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5),
+    message: `👤 ${clean} takes the ${color.toUpperCase()} seat!`,
+    type: 'info',
+    timestamp: new Date().toISOString(),
+  });
+  return bot;
+}
+
+// Is the preselected winner already sitting at some OTHER table?
+function forcedWinnerSeatedElsewhere(exceptRoomId: string): boolean {
+  if (!allHandsForcedWinnerName) return false;
+  return allHandsTables().some(t =>
+    t.roomId !== exceptRoomId && t.players.some(p => p.name === allHandsForcedWinnerName));
+}
+
 // Fill empty seats with bots up to the configured All Hands size (2–4).
 function fillAllHandsBots(room: GameState) {
-  const colors: PlayerColor[] = ['red', 'green', 'yellow', 'blue'];
   const cap = clampAllHandsSize(allHandsSize);
   const pool = botNamePool();
+
+  // Guarantee the preselected-winner bot a seat — but ONLY if they aren't
+  // already sitting at another table. Without that check one pick would be
+  // cloned onto every table and win all of them at once.
+  if (allHandsForcedWinnerName
+      && room.players.length < cap
+      && !room.players.some(p => p.name === allHandsForcedWinnerName)
+      && !forcedWinnerSeatedElsewhere(room.roomId)) {
+    seatAllHandsBot(room, allHandsForcedWinnerName);
+  }
+
   while (room.players.length < cap) {
-    const assigned = room.players.map(p => p.color).filter(Boolean) as PlayerColor[];
-    const color = colors.find(c => !assigned.includes(c));
-    if (!color) break;
     const taken = new Set(room.players.map(p => p.name));
-    // Seat the preselected-winner bot first so it's guaranteed a seat (test rig).
-    const name = (allHandsForcedWinnerName && !taken.has(allHandsForcedWinnerName))
-      ? allHandsForcedWinnerName
-      : (pool.find(n => !taken.has(n)) || pool[Math.floor(Math.random() * pool.length)]);
-    room.players.push({
-      id: 'bot_' + color,
-      name,
-      color,
-      isBot: true,
-      balance: 0,
-      currentBet: 0,
-      ready: true,
-      cardsCount: 0,
-      hand: [],
-      isConnected: true,
-      highestRollInRound: 0,
-      totalRollsCount: 0,
-    });
-    room.logs.push({
-      id: 'log_ah_join_' + Date.now() + '_' + Math.random().toString(36).substring(2, 5),
-      message: `👤 ${name} takes the ${color.toUpperCase()} seat!`,
-      type: 'info',
-      timestamp: new Date().toISOString(),
-    });
+    let name = pool.find(n => !taken.has(n));
+    if (!name) {
+      // Roster exhausted — suffix a name so seats still fill and no two bots
+      // at one table share a name (which would break the winner pick).
+      const base = pool[Math.floor(Math.random() * pool.length)] || 'Bot';
+      let i = 2;
+      name = base;
+      while (taken.has(name)) name = `${base} ${i++}`;
+    }
+    if (!seatAllHandsBot(room, name)) break;
   }
 }
 
@@ -2443,10 +2480,67 @@ app.post('/api/admin/all-hands/table', (req, res) => {
     tables,
     adminStart: adminConfig.allHandsAdminStart,
     forcedWinner: allHandsForcedWinnerName,
+    botRoster: botNamePool(),
     prizeActive: prize.active,
     prize: prize.prize,
     sponsorName: prize.sponsorName,
   });
+});
+
+// Seat a specific bot at a specific table, before the game starts. This is what
+// lets you place a bot and then pick it as the winner — bots are otherwise only
+// seated at kickoff, so there'd be nothing to select.
+app.post('/api/admin/all-hands/add-bot', (req, res) => {
+  const { email, passcode, roomId, name } = req.body || {};
+  if (!adminOk(email, passcode)) return res.status(401).json({ error: 'Invalid admin email or passcode.' });
+
+  const room = gameRooms[String(roomId || '')];
+  if (!room || !isAllHandsRoom(room.roomId)) return res.status(400).json({ error: 'Unknown table.' });
+  if (room.status === 'playing') return res.status(409).json({ error: 'That table is already playing.' });
+  if (room.status === 'finished') resetAllHandsRoom(room);
+
+  const botName = String(name || '').trim();
+  if (!botName) return res.status(400).json({ error: 'Choose a bot.' });
+  if (room.players.some(p => p.name === botName)) {
+    return res.status(409).json({ error: `${botName} is already at that table.` });
+  }
+  if (room.players.length >= clampAllHandsSize(allHandsSize)) {
+    return res.status(409).json({ error: 'That table is full.' });
+  }
+
+  const bot = seatAllHandsBot(room, botName);
+  if (!bot) return res.status(409).json({ error: 'Could not seat that bot.' });
+
+  room.status = 'betting';
+  broadcastRoomState(room.roomId);
+  res.json({ success: true, roomId: room.roomId, name: bot.name });
+});
+
+// Remove a bot you seated by hand (humans can't be removed this way).
+app.post('/api/admin/all-hands/remove-bot', (req, res) => {
+  const { email, passcode, roomId, name } = req.body || {};
+  if (!adminOk(email, passcode)) return res.status(401).json({ error: 'Invalid admin email or passcode.' });
+
+  const room = gameRooms[String(roomId || '')];
+  if (!room || !isAllHandsRoom(room.roomId)) return res.status(400).json({ error: 'Unknown table.' });
+  if (room.status === 'playing') return res.status(409).json({ error: 'That table is already playing.' });
+
+  const botName = String(name || '').trim();
+  const target = room.players.find(p => p.name === botName && p.isBot);
+  if (!target) return res.status(404).json({ error: 'No such bot at that table.' });
+
+  room.players = room.players.filter(p => p !== target);
+  broadcastRoomState(room.roomId);
+  res.json({ success: true });
+});
+
+// Set the preselected winner by name — a seated player, or any bot from the
+// roster (which then gets a guaranteed seat when a table starts).
+app.post('/api/admin/all-hands/winner', (req, res) => {
+  const { email, passcode, name } = req.body || {};
+  if (!adminOk(email, passcode)) return res.status(401).json({ error: 'Invalid admin email or passcode.' });
+  allHandsForcedWinnerName = String(name || '').trim();
+  res.json({ success: true, forcedWinner: allHandsForcedWinnerName });
 });
 
 // Deal the cards. Fills any empty seats with bots, exactly like the old
