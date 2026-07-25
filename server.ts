@@ -1,14 +1,18 @@
 // MUST be first: populates process.env from .env.local before db.ts reads it.
 import './src/load-env.js';
 import express from 'express';
+import type { Request as ExpressRequest } from 'express';
 import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { GameState, Player, PlayerColor, WhotCard, CardSuit, GameLog, Transaction, UserProfile, AntiCheatAlert } from './src/types.js';
+import { GameState, Player, PlayerColor, WhotCard, CardSuit, GameLog, Transaction, UserProfile, AntiCheatAlert, ReferralSummary } from './src/types.js';
 import {
   AdminConfig,
   loadAdminConfig, saveAdminConfig,
   loadProfile, persistProfile, recordTransaction, deleteProfile,
+  ensureReferralCode, normalizeReferralCode, findEmailByReferralCode,
+  createReferral, getPendingReferralFor, claimReferralReward, markReferralCapped,
+  referralStats,
 } from './src/db.js';
 
 const PORT = Number(process.env.PORT) || 5174;
@@ -66,8 +70,8 @@ function getProfile(email: string): UserProfile {
   if (!profileCache[cleanEmail]) {
     profileCache[cleanEmail] = {
       email: cleanEmail, balance: 0, totalEarnings: 0, gamesPlayed: 0, gamesWon: 0,
-      highestRoll: 0, tickets: 0, freeGameUsed: false, verificationStatus: 'unverified',
-      verificationDetails: null, history: [],
+      highestRoll: 0, tickets: 0, freeGameUsed: false, referralCode: '',
+      verificationStatus: 'unverified', verificationDetails: null, history: [],
     };
     ensureProfile(cleanEmail).catch(() => {});
   }
@@ -85,6 +89,84 @@ function addTransaction(email: string, tx: Transaction): void {
   const p = profileCache[email.toLowerCase().trim()];
   if (p) p.history.unshift(tx);
   recordTransaction(email, tx).catch(err => console.error('addTransaction:', err));
+}
+
+// -----------------------------------------------------------------------------
+// REFERRALS
+//
+// A signed-in player shares …/?ref=CODE. Whoever opens it while logged out has
+// the code stashed on their device; it rides through sign-up and is claimed via
+// POST /api/referral/claim. Nothing is paid out at that point — the referrer
+// only earns their free ticket once that invitee actually BUYS tickets, and
+// only up to REFERRAL_REWARD_CAP rewards in total.
+//
+// This is additive: the lifetime free game every new player already gets
+// (freeGameEnabled / freeGameUsed) is untouched.
+// -----------------------------------------------------------------------------
+const REFERRAL_REWARD_TICKETS = 1;  // free tickets per qualifying referral
+const REFERRAL_REWARD_CAP = 10;     // most rewards one player can ever earn
+
+// Where the shareable link points. PUBLIC_APP_URL wins (set it to the Vercel
+// origin on Render); otherwise fall back to the caller's origin, then to the
+// CORS allowlist. May be '' — the client fills in its own origin in that case.
+function appBaseUrl(req: ExpressRequest): string {
+  const explicit = (process.env.PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
+  if (explicit) return explicit;
+  const origin = String(req.headers.origin || '').trim().replace(/\/+$/, '');
+  if (origin) return origin;
+  const allowed = allowedOrigins.find(o => o && o !== '*');
+  return allowed ? allowed.replace(/\/+$/, '') : '';
+}
+
+// Tell a referrer, live, that they just earned a ticket (if they're connected).
+function notifyReferralReward(email: string, tickets: number): void {
+  const target = email.toLowerCase().trim();
+  const message = tickets === 1
+    ? 'Referral reward — someone you invited bought tickets. You earned 1 free ticket!'
+    : `Referral reward — you earned ${tickets} free tickets!`;
+  for (const cid of Object.keys(activeConnections)) {
+    const c = activeConnections[cid];
+    if (c.email.toLowerCase() === target && c.ws.readyState === WebSocket.OPEN) {
+      c.ws.send(JSON.stringify({ type: 'referral-reward', tickets, message }));
+    }
+  }
+}
+
+// Credit the referrer when someone they invited buys tickets. Safe to call after
+// every purchase: the pending referral row is consumed by the first qualifying
+// call and ignored forever after.
+async function awardReferralIfEligible(referredEmail: string): Promise<void> {
+  const pending = await getPendingReferralFor(referredEmail);
+  if (!pending) return; // not referred, or already paid out
+
+  const referrer = pending.referrerEmail;
+  const { rewarded } = await referralStats(referrer);
+  if (rewarded >= REFERRAL_REWARD_CAP) {
+    // Retire the row so it isn't re-examined on every future purchase.
+    await markReferralCapped(pending.id);
+    return;
+  }
+
+  // Compare-and-swap on the ledger row: only the caller that flips
+  // pending → rewarded goes on to credit the ticket, so a double purchase
+  // landing at the same instant can never pay out twice.
+  const won = await claimReferralReward(pending.id);
+  if (!won) return;
+
+  const referrerProfile = await ensureProfile(referrer);
+  referrerProfile.tickets += REFERRAL_REWARD_TICKETS;
+  addTransaction(referrer, {
+    id: generateHash(),
+    type: 'ticket',
+    amount: 0, // free — no money moved
+    status: 'completed',
+    timestamp: new Date().toISOString(),
+    method: `Referral reward — ${REFERRAL_REWARD_TICKETS} free ticket${REFERRAL_REWARD_TICKETS === 1 ? '' : 's'}`,
+    txHash: 'tx_ref_' + pending.id.slice(0, 8),
+    balanceAfter: referrerProfile.balance,
+  });
+  saveProfile(referrer);
+  notifyReferralReward(referrer, REFERRAL_REWARD_TICKETS);
 }
 
 // -----------------------------------------------------------------------------
@@ -1698,7 +1780,66 @@ app.post('/api/profile/buy-tickets', async (req, res) => {
   addTransaction(email, newTx);
   saveProfile(email);
 
+  // If this buyer arrived through someone's referral link, that referrer has now
+  // earned their free ticket. A referral hiccup must never fail the purchase.
+  await awardReferralIfEligible(email).catch(err => console.error('referral reward:', err));
+
   res.json({ success: true, tickets: profile.tickets, balance: profile.balance, transaction: newTx });
+});
+
+// 2b-i. GET this player's referral code, shareable link and reward progress.
+app.get('/api/referral', async (req, res) => {
+  const email = String(req.query.email || '').toLowerCase().trim();
+  if (!email) return res.status(400).json({ error: 'Missing account email.' });
+
+  const profile = await ensureProfile(email);
+  const code = await ensureReferralCode(email);
+  profile.referralCode = code; // keep the cached profile in step
+
+  const stats = await referralStats(email);
+  const base = appBaseUrl(req);
+  const summary: ReferralSummary = {
+    code,
+    link: code && base ? `${base}/?ref=${code}` : '',
+    invited: stats.invited,
+    rewarded: stats.rewarded,
+    cap: REFERRAL_REWARD_CAP,
+    remaining: Math.max(0, REFERRAL_REWARD_CAP - stats.rewarded),
+    rewardTickets: REFERRAL_REWARD_TICKETS,
+  };
+  res.json(summary);
+});
+
+// 2b-ii. POST claim a referral code that was captured before sign-up.
+// Attribution is one-shot and first-link-wins — it is never reassigned, and it
+// pays out nothing here. The reward fires later, when this account buys tickets.
+app.post('/api/referral/claim', async (req, res) => {
+  const { email, code } = req.body || {};
+  const cleanEmail = String(email || '').toLowerCase().trim();
+  const cleanCode = normalizeReferralCode(String(code || ''));
+  if (!cleanEmail || !cleanCode) {
+    return res.status(400).json({ error: 'Missing account email or referral code.' });
+  }
+
+  // Creates the invitee's profile row if this is their very first request —
+  // the referrals FK requires it to exist.
+  const profile = await ensureProfile(cleanEmail);
+
+  // The reward is for bringing in NEW players, so only an account that has done
+  // nothing yet can be attributed. This stops an established player from being
+  // farmed as somebody's referral.
+  if (profile.history.length > 0 || profile.gamesPlayed > 0) {
+    return res.json({ attached: false, reason: 'not-a-new-account' });
+  }
+
+  const referrerEmail = await findEmailByReferralCode(cleanCode);
+  if (!referrerEmail) return res.json({ attached: false, reason: 'unknown-code' });
+  if (referrerEmail.toLowerCase() === cleanEmail) {
+    return res.json({ attached: false, reason: 'self-referral' });
+  }
+
+  const row = await createReferral(referrerEmail, cleanEmail, cleanCode);
+  res.json({ attached: !!row, reason: row ? '' : 'already-referred' });
 });
 
 // 2c. GET public app config (includes isAdmin flag for the given email)

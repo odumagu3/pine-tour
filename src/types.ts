@@ -96,6 +96,7 @@ export interface UserProfile {
   highestRoll: number; // Repurposed for statistical achievements
   tickets: number; // Tournament tickets available (each = 1 entry)
   freeGameUsed: boolean; // Whether the lifetime free tournament entry has been consumed
+  referralCode: string; // This player's shareable code ('' until one is minted)
   verificationStatus: 'unverified' | 'pending' | 'verified';
   verificationDetails: {
     fullName: string;
@@ -104,6 +105,17 @@ export interface UserProfile {
     submittedAt?: string;
   } | null;
   history: Transaction[];
+}
+
+// What /api/referral returns — everything the "Refer & Earn" panel renders.
+export interface ReferralSummary {
+  code: string;          // the player's shareable code
+  link: string;          // the full link to copy (…/?ref=CODE)
+  invited: number;       // people who signed up through the link
+  rewarded: number;      // of those, how many bought tickets and paid out
+  cap: number;           // most free tickets one player can earn this way
+  remaining: number;     // free tickets still earnable (cap - rewarded)
+  rewardTickets: number; // free tickets granted per qualifying referral
 }
 
 // Public app config the frontend consumes (served by /api/config).

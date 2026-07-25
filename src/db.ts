@@ -119,6 +119,7 @@ function rowToProfile(r: any, history: Transaction[]): UserProfile {
     highestRoll: Number(r.highest_roll),
     tickets: Number(r.tickets),
     freeGameUsed: !!r.free_game_used,
+    referralCode: r.referral_code ?? '',
     verificationStatus: r.verification_status,
     verificationDetails: r.verification_details ?? null,
     history,
@@ -135,6 +136,7 @@ function defaultProfile(email: string): UserProfile {
     highestRoll: 0,
     tickets: 0,
     freeGameUsed: false,
+    referralCode: '',
     verificationStatus: 'unverified',
     verificationDetails: null,
     history: [],
@@ -167,6 +169,8 @@ export async function loadProfile(email: string): Promise<UserProfile> {
 }
 
 // Write-through: persist the mutable profile fields (history lives in its own table).
+// NOTE: referral_code is deliberately absent — it is minted once by
+// ensureReferralCode() and must never be overwritten by a routine profile save.
 export async function persistProfile(p: UserProfile): Promise<void> {
   if (!persistenceEnabled) return;
   const { error } = await supabase.from('profiles').upsert({
@@ -206,4 +210,183 @@ export async function deleteProfile(email: string): Promise<void> {
   if (!persistenceEnabled) return;
   const { error } = await supabase.from('profiles').delete().eq('email', email.toLowerCase().trim());
   if (error) console.error('deleteProfile failed:', error.message);
+}
+
+// -----------------------------------------------------------------------------
+// Referrals
+//
+// A player shares …/?ref=CODE. Whoever signs up through it gets a row in
+// `referrals` with status 'pending'; when that invitee buys tickets the row is
+// flipped to 'rewarded' and the referrer is credited a free ticket. The unique
+// constraint on referred_email means one invitee can only ever be attributed
+// once, and the compare-and-swap in claimReferralReward() means the payout can
+// only ever fire once — even if two ticket purchases land at the same instant.
+// -----------------------------------------------------------------------------
+
+export interface ReferralRow {
+  id: string;
+  referrerEmail: string;
+  referredEmail: string;
+  code: string;
+  status: 'pending' | 'rewarded' | 'capped';
+  rewardedAt: string | null;
+  createdAt: string;
+}
+
+function rowToReferral(r: any): ReferralRow {
+  return {
+    id: r.id,
+    referrerEmail: r.referrer_email,
+    referredEmail: r.referred_email,
+    code: r.code,
+    status: r.status,
+    rewardedAt: r.rewarded_at ?? null,
+    createdAt: r.created_at,
+  };
+}
+
+// Codes are typed and read aloud, so the alphabet drops the characters people
+// confuse: I/1 and O/0.
+const REFERRAL_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const REFERRAL_CODE_LENGTH = 6;
+
+function mintReferralCode(): string {
+  let out = '';
+  for (let i = 0; i < REFERRAL_CODE_LENGTH; i++) {
+    out += REFERRAL_ALPHABET[Math.floor(Math.random() * REFERRAL_ALPHABET.length)];
+  }
+  return out;
+}
+
+// Accept whatever the user pasted (lowercase, stray spaces, a trailing slash)
+// and reduce it to the canonical form stored in the database.
+export function normalizeReferralCode(code: string): string {
+  return (code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, REFERRAL_CODE_LENGTH);
+}
+
+// Return this profile's referral code, minting one on first use. Existing rows
+// predate the column, so this backfills them lazily rather than in a migration.
+export async function ensureReferralCode(email: string): Promise<string> {
+  if (!persistenceEnabled) return '';
+  const cleanEmail = email.toLowerCase().trim();
+
+  const { data: existing, error: readErr } = await supabase
+    .from('profiles').select('referral_code').eq('email', cleanEmail).maybeSingle();
+  if (readErr) { console.error('ensureReferralCode read failed:', readErr.message); return ''; }
+  if (existing?.referral_code) return existing.referral_code;
+
+  // Retry on the (very unlikely) collision with an already-issued code.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const code = mintReferralCode();
+    const { data: updated, error } = await supabase
+      .from('profiles')
+      .update({ referral_code: code })
+      .eq('email', cleanEmail)
+      .is('referral_code', null) // never clobber a code this profile already has
+      .select('referral_code')
+      .maybeSingle();
+
+    if (!error && updated?.referral_code) return updated.referral_code;
+    if (error && error.code !== '23505') {
+      console.error('ensureReferralCode write failed:', error.message);
+      return '';
+    }
+    // Either the code collided, or a concurrent request already assigned one.
+    // Re-read: if a code is now present we are done, otherwise loop and retry.
+    const { data: again } = await supabase
+      .from('profiles').select('referral_code').eq('email', cleanEmail).maybeSingle();
+    if (again?.referral_code) return again.referral_code;
+  }
+
+  console.error('ensureReferralCode: exhausted attempts for', cleanEmail);
+  return '';
+}
+
+// Resolve a shared code back to the player who owns it.
+export async function findEmailByReferralCode(code: string): Promise<string | null> {
+  if (!persistenceEnabled) return null;
+  const clean = normalizeReferralCode(code);
+  if (clean.length !== REFERRAL_CODE_LENGTH) return null;
+  const { data, error } = await supabase
+    .from('profiles').select('email').eq('referral_code', clean).maybeSingle();
+  if (error) { console.error('findEmailByReferralCode failed:', error.message); return null; }
+  return data?.email ?? null;
+}
+
+// Attribute an invitee to a referrer. Returns null when the invitee was already
+// attributed to someone (unique violation) or the row was rejected — attribution
+// is first-link-wins and never reassigned.
+export async function createReferral(
+  referrerEmail: string, referredEmail: string, code: string,
+): Promise<ReferralRow | null> {
+  if (!persistenceEnabled) return null;
+  const { data, error } = await supabase.from('referrals').insert({
+    referrer_email: referrerEmail.toLowerCase().trim(),
+    referred_email: referredEmail.toLowerCase().trim(),
+    code: normalizeReferralCode(code),
+  }).select('*').maybeSingle();
+
+  if (error) {
+    // 23505 = this invitee already has a referrer; 23514 = self-referral check.
+    if (error.code !== '23505' && error.code !== '23514') {
+      console.error('createReferral failed:', error.message);
+    }
+    return null;
+  }
+  return data ? rowToReferral(data) : null;
+}
+
+// The unpaid referral for this invitee, if they were referred and have not yet
+// triggered the payout.
+export async function getPendingReferralFor(referredEmail: string): Promise<ReferralRow | null> {
+  if (!persistenceEnabled) return null;
+  const { data, error } = await supabase
+    .from('referrals').select('*')
+    .eq('referred_email', referredEmail.toLowerCase().trim())
+    .eq('status', 'pending')
+    .maybeSingle();
+  if (error) { console.error('getPendingReferralFor failed:', error.message); return null; }
+  return data ? rowToReferral(data) : null;
+}
+
+// Flip pending → rewarded. The `.eq('status', 'pending')` guard makes this a
+// compare-and-swap: exactly one caller can win, so the free ticket is credited
+// exactly once. Returns true only for the caller that won.
+export async function claimReferralReward(id: string): Promise<boolean> {
+  if (!persistenceEnabled) return false;
+  const { data, error } = await supabase
+    .from('referrals')
+    .update({ status: 'rewarded', rewarded_at: new Date().toISOString() })
+    .eq('id', id)
+    .eq('status', 'pending')
+    .select('id');
+  if (error) { console.error('claimReferralReward failed:', error.message); return false; }
+  return (data?.length ?? 0) > 0;
+}
+
+// Mark a qualifying referral that arrived after the referrer hit their cap, so
+// it is not re-examined on every future purchase.
+export async function markReferralCapped(id: string): Promise<void> {
+  if (!persistenceEnabled) return;
+  const { error } = await supabase
+    .from('referrals').update({ status: 'capped' }).eq('id', id).eq('status', 'pending');
+  if (error) console.error('markReferralCapped failed:', error.message);
+}
+
+// Counts behind the "Refer & Earn" panel and the reward cap.
+export async function referralStats(referrerEmail: string): Promise<{ invited: number; rewarded: number }> {
+  if (!persistenceEnabled) return { invited: 0, rewarded: 0 };
+  const clean = referrerEmail.toLowerCase().trim();
+
+  const [invited, rewarded] = await Promise.all([
+    supabase.from('referrals').select('id', { count: 'exact', head: true })
+      .eq('referrer_email', clean),
+    supabase.from('referrals').select('id', { count: 'exact', head: true })
+      .eq('referrer_email', clean).eq('status', 'rewarded'),
+  ]);
+
+  if (invited.error) console.error('referralStats(invited) failed:', invited.error.message);
+  if (rewarded.error) console.error('referralStats(rewarded) failed:', rewarded.error.message);
+
+  return { invited: invited.count ?? 0, rewarded: rewarded.count ?? 0 };
 }

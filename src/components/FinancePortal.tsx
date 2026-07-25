@@ -5,6 +5,7 @@ import { CreditCard, Wallet, ArrowDownLeft, ArrowUpRight, ShieldCheck, HelpCircl
 import { formatNaira, TICKET_PRICE, MIN_TICKETS, MAX_TICKETS } from '../currency.js';
 import { apiUrl } from '../config.js';
 import PaystackCheckout from './PaystackCheckout.tsx';
+import ReferralPanel from './ReferralPanel.tsx';
 
 // Nigerian banks for the Paystack payout (withdrawal) flow.
 const NG_BANKS = ['Access Bank', 'GTBank', 'Zenith Bank', 'UBA', 'First Bank', 'Kuda', 'OPay', 'PalmPay', 'Fidelity Bank', 'Union Bank', 'Wema Bank', 'Sterling Bank'];
@@ -20,8 +21,8 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
   const unitPrice = config?.ticketPrice ?? TICKET_PRICE;
   const minQty = config?.minTickets ?? MIN_TICKETS;
   const maxQty = config?.maxTickets ?? MAX_TICKETS;
-  // Tabs: 'tickets' | 'deposit' | 'withdraw' | 'verification'
-  const [activeTab, setActiveTab] = useState<'tickets' | 'deposit' | 'withdraw' | 'verification'>('tickets');
+  // Tabs: 'tickets' | 'referral' | 'deposit' | 'withdraw' | 'verification'
+  const [activeTab, setActiveTab] = useState<'tickets' | 'referral' | 'deposit' | 'withdraw' | 'verification'>('tickets');
 
   // Ticket purchase states
   const [ticketQty, setTicketQty] = useState(minQty);
@@ -290,6 +291,18 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
           </button>
 
           <button
+            onClick={() => setActiveTab('referral')}
+            className={`flex-1 min-w-max py-2 px-2 rounded-lg font-mono text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+              activeTab === 'referral'
+                ? 'bg-neon-green/10 border border-neon-green/30 text-neon-green shadow-[0_0_10px_rgba(0,255,102,0.15)]'
+                : 'text-slate-400 hover:text-white hover:bg-slate-900/50'
+            }`}
+          >
+            <Gift className="w-4 h-4" />
+            Refer &amp; Earn
+          </button>
+
+          <button
             onClick={() => setActiveTab('deposit')}
             className={`flex-1 min-w-max py-2 px-2 rounded-lg font-mono text-xs font-bold transition-all flex items-center justify-center gap-2 ${
               activeTab === 'deposit'
@@ -365,6 +378,19 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                       </span>
                     )}
                   </div>
+
+                  {/* The other way to get a ticket without paying for it. */}
+                  <button
+                    onClick={() => setActiveTab('referral')}
+                    className="w-full text-left bg-neon-green/5 border border-neon-green/25 rounded-xl px-4 py-3 flex items-center gap-3 hover:bg-neon-green/10 transition-all cursor-pointer"
+                  >
+                    <Gift className="w-4 h-4 text-neon-green flex-shrink-0" />
+                    <span className="text-[11px] font-mono text-slate-300 flex-1">
+                      Invite a friend — when they sign up and buy tickets, you get a{' '}
+                      <strong className="text-neon-green">free ticket</strong>.
+                    </span>
+                    <span className="text-[10px] font-mono text-neon-green whitespace-nowrap">Refer &amp; Earn →</span>
+                  </button>
 
                   {/* Quantity picker */}
                   <div className="bg-gradient-to-br from-neon-purple/10 to-slate-950 border border-neon-purple/30 rounded-2xl p-5 relative overflow-hidden space-y-4">
@@ -468,6 +494,9 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
               )}
             </AnimatePresence>
           )}
+
+          {/* 0b. REFER & EARN — share a link, earn free tickets when invitees buy */}
+          {activeTab === 'referral' && <ReferralPanel email={profile.email} />}
 
           {/* 1. DEPOSIT PORTAL — Paystack checkout */}
           {activeTab === 'deposit' && (

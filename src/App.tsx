@@ -18,6 +18,7 @@ import { ShieldCheck, MessageSquare, Send, Bell, User, LayoutDashboard, Wallet, 
 import { formatNaira } from './currency.js';
 import { supabase } from './supabaseClient.js';
 import { apiUrl, wsUrl } from './config.js';
+import { getStoredReferral, clearStoredReferral } from './referral.js';
 
 // --- Lobby preferences (nickname + room) persisted across refreshes -------
 // Identity/auth is handled by Supabase; these are just convenience prefs.
@@ -290,6 +291,15 @@ export default function App() {
             setGameplayNotice((prev) => (prev === data.message ? null : prev));
           }, 4000);
           break;
+        case 'referral-reward':
+          // Someone we invited just bought tickets — the free ticket has already
+          // landed on the server, so pull the profile to show the new count.
+          setGameplayNotice(data.message);
+          fetchProfile();
+          setTimeout(() => {
+            setGameplayNotice((prev) => (prev === data.message ? null : prev));
+          }, 6000);
+          break;
         case 'error': {
           const m = data.message || '';
           // Registration failures keep the player in-app on the Join panel so
@@ -367,6 +377,29 @@ export default function App() {
     if (!email) return;
     fetchProfile();
     fetchConfig(email);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [email]);
+
+  // Claim a referral code that was captured before sign-up, now that we know
+  // which account it belongs to. This pays out nothing — it only records who
+  // invited this player. Their referrer earns the free ticket later, when THIS
+  // account buys tickets.
+  useEffect(() => {
+    if (!email) return;
+    const code = getStoredReferral();
+    if (!code) return;
+    (async () => {
+      try {
+        const res = await fetch(apiUrl('/api/referral/claim'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, code }),
+        });
+        // Only a settled answer consumes the code. A 5xx or a network blip
+        // leaves it in place so the next load can try again.
+        if (res.ok) clearStoredReferral();
+      } catch { /* offline — keep the code and retry on the next load */ }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [email]);
 
