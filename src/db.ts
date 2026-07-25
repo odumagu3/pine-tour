@@ -124,6 +124,7 @@ function rowToProfile(r: any, history: Transaction[]): UserProfile {
     tickets: Number(r.tickets),
     freeGameUsed: !!r.free_game_used,
     referralCode: r.referral_code ?? '',
+    hasWithdrawalPin: !!r.withdrawal_pin_hash, // boolean only — never the hash
     verificationStatus: r.verification_status,
     verificationDetails: r.verification_details ?? null,
     history,
@@ -141,6 +142,7 @@ function defaultProfile(email: string): UserProfile {
     tickets: 0,
     freeGameUsed: false,
     referralCode: '',
+    hasWithdrawalPin: false,
     verificationStatus: 'unverified',
     verificationDetails: null,
     history: [],
@@ -173,8 +175,9 @@ export async function loadProfile(email: string): Promise<UserProfile> {
 }
 
 // Write-through: persist the mutable profile fields (history lives in its own table).
-// NOTE: referral_code is deliberately absent — it is minted once by
-// ensureReferralCode() and must never be overwritten by a routine profile save.
+// NOTE: referral_code and withdrawal_pin_hash are deliberately absent. Both are
+// written only by their own dedicated functions, and must never be overwritten
+// (or blanked) by a routine profile save.
 export async function persistProfile(p: UserProfile): Promise<void> {
   if (!persistenceEnabled) return;
   const { error } = await supabase.from('profiles').upsert({
@@ -214,6 +217,129 @@ export async function deleteProfile(email: string): Promise<void> {
   if (!persistenceEnabled) return;
   const { error } = await supabase.from('profiles').delete().eq('email', email.toLowerCase().trim());
   if (error) console.error('deleteProfile failed:', error.message);
+}
+
+// -----------------------------------------------------------------------------
+// Withdrawal PIN
+//
+// Read and written only here. The hash never leaves the server — rowToProfile
+// exposes it to clients as the boolean `hasWithdrawalPin` and nothing else.
+// -----------------------------------------------------------------------------
+
+export async function getWithdrawalPinHash(email: string): Promise<string | null> {
+  if (!persistenceEnabled) return null;
+  const { data, error } = await supabase
+    .from('profiles').select('withdrawal_pin_hash')
+    .eq('email', email.toLowerCase().trim()).maybeSingle();
+  if (error) { console.error('getWithdrawalPinHash failed:', error.message); return null; }
+  return data?.withdrawal_pin_hash ?? null;
+}
+
+export async function setWithdrawalPinHash(email: string, hash: string): Promise<boolean> {
+  if (!persistenceEnabled) return false;
+  const { error } = await supabase
+    .from('profiles').update({ withdrawal_pin_hash: hash })
+    .eq('email', email.toLowerCase().trim());
+  if (error) { console.error('setWithdrawalPinHash failed:', error.message); return false; }
+  return true;
+}
+
+// -----------------------------------------------------------------------------
+// Payments (real Paystack deposits)
+//
+// One row per initialized transaction, keyed by the reference we generated.
+// A deposit can be reported twice — the client calls /verify AND Paystack's
+// webhook fires (and retries) — so crediting is a compare-and-swap on status:
+// only the caller that flips 'pending' → 'credited' actually moves the money.
+// -----------------------------------------------------------------------------
+
+export interface PaymentRow {
+  reference: string;
+  email: string;
+  amount: number;       // naira we asked Paystack to charge
+  status: 'pending' | 'credited' | 'failed';
+  channel: string | null;
+  paidAmount: number | null;
+  createdAt: string;
+}
+
+function rowToPayment(r: any): PaymentRow {
+  return {
+    reference: r.reference,
+    email: r.email,
+    amount: Number(r.amount),
+    status: r.status,
+    channel: r.channel ?? null,
+    paidAmount: r.paid_amount == null ? null : Number(r.paid_amount),
+    createdAt: r.created_at,
+  };
+}
+
+// Record an initialized transaction before the player is sent to Paystack.
+export async function createPayment(
+  reference: string, email: string, amount: number,
+): Promise<boolean> {
+  if (!persistenceEnabled) return false;
+  const { error } = await supabase.from('payments').insert({
+    reference,
+    email: email.toLowerCase().trim(),
+    amount,
+  });
+  if (error) { console.error('createPayment failed:', error.message); return false; }
+  return true;
+}
+
+export async function getPayment(reference: string): Promise<PaymentRow | null> {
+  if (!persistenceEnabled) return null;
+  const { data, error } = await supabase
+    .from('payments').select('*').eq('reference', reference).maybeSingle();
+  if (error) { console.error('getPayment failed:', error.message); return null; }
+  return data ? rowToPayment(data) : null;
+}
+
+// Mark a payment credited. Returns true ONLY for the caller that won the race,
+// so the wallet is credited once even when /verify and a retrying webhook both
+// report the same payment.
+//
+// The guard is `status <> 'credited'`, NOT `status = 'pending'`. That matters:
+// a player can abandon checkout (which we may have recorded as failed) and then
+// complete the payment by bank transfer minutes later. Paystack saying
+// charge.success is authoritative — our earlier guess must never be able to
+// block a real payment from reaching the player's wallet. It is still a correct
+// compare-and-swap: Postgres re-evaluates the predicate after the row lock, so
+// a second concurrent caller finds status='credited' and matches nothing.
+export async function creditPayment(
+  reference: string, paidAmount: number, channel: string,
+): Promise<boolean> {
+  if (!persistenceEnabled) return false;
+  const { data, error } = await supabase
+    .from('payments')
+    .update({
+      status: 'credited',
+      paid_amount: paidAmount,
+      channel,
+      credited_at: new Date().toISOString(),
+    })
+    .eq('reference', reference)
+    .neq('status', 'credited')
+    .select('reference');
+  if (error) { console.error('creditPayment failed:', error.message); return false; }
+  return (data?.length ?? 0) > 0;
+}
+
+// Mark a payment failed. Only for cases where a charge can never exist — e.g.
+// Paystack rejected the initialize call outright.
+//
+// Deliberately NOT called when a verify returns 'abandoned' or 'failed': those
+// are not terminal. The player may still complete the same reference by bank
+// transfer or USSD, and creditPayment() is written so a later charge.success
+// credits them regardless. Never let a local guess strand a real payment.
+export async function markPaymentFailed(reference: string): Promise<void> {
+  if (!persistenceEnabled) return;
+  const { error } = await supabase
+    .from('payments').update({ status: 'failed' })
+    .eq('reference', reference).eq('status', 'pending');
+  if (error) console.error('markPaymentFailed failed:', error.message);
 }
 
 // -----------------------------------------------------------------------------

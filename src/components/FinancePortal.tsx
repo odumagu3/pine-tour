@@ -4,8 +4,8 @@ import { UserProfile, Transaction, PublicConfig } from '../types.js';
 import { CreditCard, Wallet, ArrowDownLeft, ArrowUpRight, ShieldCheck, HelpCircle, Lock, Loader2, CheckCircle2, AlertCircle, Copy, Check, Ticket, Gift, Landmark } from 'lucide-react';
 import { formatNaira, TICKET_PRICE, MIN_TICKETS, MAX_TICKETS } from '../currency.js';
 import { apiUrl } from '../config.js';
-import PaystackCheckout from './PaystackCheckout.tsx';
 import ReferralPanel from './ReferralPanel.tsx';
+import { openPaystackCheckout } from '../paystack.js';
 
 // Nigerian banks for the Paystack payout (withdrawal) flow.
 const NG_BANKS = ['Access Bank', 'GTBank', 'Zenith Bank', 'UBA', 'First Bank', 'Kuda', 'OPay', 'PalmPay', 'Fidelity Bank', 'Union Bank', 'Wema Bank', 'Sterling Bank'];
@@ -46,6 +46,37 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
   const [withdrawPin, setWithdrawPin] = useState('');
   const [withdrawStatus, setWithdrawStatus] = useState<'idle' | 'processing' | 'completed'>('idle');
   const [withdrawError, setWithdrawError] = useState('');
+
+  // Withdrawal PIN — set once per account, then required for every payout.
+  const [pinMode, setPinMode] = useState<'idle' | 'editing'>('idle');
+  const [newPin, setNewPin] = useState('');
+  const [confirmPin, setConfirmPin] = useState('');
+  const [currentPin, setCurrentPin] = useState('');
+  const [pinError, setPinError] = useState('');
+  const [pinSaving, setPinSaving] = useState(false);
+
+  const savePin = async () => {
+    setPinError('');
+    if (newPin !== confirmPin) { setPinError('The two PINs do not match.'); return; }
+    if (!/^\d{4}$/.test(newPin)) { setPinError('PIN must be exactly 4 digits.'); return; }
+    setPinSaving(true);
+    try {
+      const res = await fetch(apiUrl('/api/profile/set-pin'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: profile.email, newPin, currentPin }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setPinError(data.error || 'Could not save your PIN.'); return; }
+      setPinMode('idle');
+      setNewPin(''); setConfirmPin(''); setCurrentPin('');
+      onRefreshProfile();
+    } catch {
+      setPinError('Lost connection to the cashier service.');
+    } finally {
+      setPinSaving(false);
+    }
+  };
 
   // KYC States
   const [kycName, setKycName] = useState('');
@@ -98,36 +129,8 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
     }
   };
 
-  // Deposit — initialize a Paystack transaction, then open the checkout popup.
-  const handleDepositSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setDepositError('');
-    const amt = parseFloat(depositAmount);
-    if (isNaN(amt) || amt < 100) {
-      setDepositError('Minimum deposit is ₦100.');
-      return;
-    }
-    setInitializing(true);
-    try {
-      const response = await fetch(apiUrl(`/api/paystack/initialize`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: profile.email, amount: amt }),
-      });
-      const data = await response.json();
-      if (!response.ok || !data.status) {
-        setDepositError(data.error || 'Could not start Paystack checkout.');
-      } else {
-        setPaystackRef(data.reference); // opens the checkout modal
-      }
-    } catch (e) {
-      setDepositError('Lost connection to the cashier service.');
-    } finally {
-      setInitializing(false);
-    }
-  };
-
-  // Called by the checkout popup when the user "pays" — verify the reference.
+  // Ask the server to verify a reference with Paystack. The server is the only
+  // thing that credits the wallet — a client callback never does.
   const verifyPaystack = async (reference: string) => {
     try {
       const res = await fetch(apiUrl(`/api/paystack/verify`), {
@@ -136,20 +139,66 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
         body: JSON.stringify({ reference }),
       });
       const data = await res.json();
-      if (res.ok && data.status) { onRefreshProfile(); return { ok: true }; }
+      if (res.ok && data.status) return { ok: true };
       return { ok: false, error: data.error || 'Payment verification failed.' };
     } catch {
       return { ok: false, error: 'Network error while verifying payment.' };
     }
   };
 
-  // The checkout closed — show a success banner if the wallet was credited.
-  const closePaystack = (credited: boolean) => {
-    setPaystackRef(null);
-    if (credited) {
-      setDepositStatus('completed');
-      onRefreshProfile();
-      setTimeout(() => setDepositStatus('idle'), 3000);
+  // Deposit — initialize server-side, open the real Paystack popup, then verify.
+  const handleDepositSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setDepositError('');
+    const amt = parseFloat(depositAmount);
+    if (isNaN(amt) || amt < 100) {
+      setDepositError('Minimum deposit is ₦100.');
+      return;
+    }
+
+    setInitializing(true);
+    try {
+      const response = await fetch(apiUrl(`/api/paystack/initialize`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: profile.email, amount: amt }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.status || !data.access_code) {
+        setDepositError(data.error || 'Could not start Paystack checkout.');
+        return;
+      }
+
+      setPaystackRef(data.reference);
+      const outcome = await openPaystackCheckout(data.access_code);
+
+      if (outcome === 'cancelled') {
+        setDepositError('Payment cancelled — nothing was charged.');
+        return;
+      }
+      if (outcome === 'error') {
+        setDepositError('Paystack reported a problem with that payment.');
+        return;
+      }
+
+      const verified = await verifyPaystack(data.reference);
+      if (verified.ok) {
+        setDepositStatus('completed');
+        onRefreshProfile();
+        setTimeout(() => setDepositStatus('idle'), 3000);
+      } else {
+        // Bank transfer and USSD can settle after the popup closes, so a failed
+        // verify here is often just "not yet" — the webhook will finish it.
+        setDepositError(
+          `${verified.error} If you completed a transfer or USSD payment, it can take a minute — your balance will update automatically.`,
+        );
+        onRefreshProfile();
+      }
+    } catch (err) {
+      setDepositError(err instanceof Error ? err.message : 'Lost connection to the cashier service.');
+    } finally {
+      setInitializing(false);
+      setPaystackRef(null);
     }
   };
 
@@ -263,16 +312,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 w-full max-w-6xl mx-auto p-2" id="finance_portal_main">
 
-      {/* Simulated Paystack checkout popup (deposit) */}
-      {paystackRef && (
-        <PaystackCheckout
-          email={profile.email}
-          amount={parseFloat(depositAmount) || 0}
-          reference={paystackRef}
-          onVerify={verifyPaystack}
-          onDone={closePaystack}
-        />
-      )}
+      {/* The Paystack popup is rendered by Paystack's own script, not by us. */}
 
       {/* CASHIER TERMINAL CARD */}
       <div className="lg:col-span-7 bg-dark-card border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col">
@@ -567,7 +607,7 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                   >
                     {initializing ? (<><Loader2 className="w-4 h-4 animate-spin" /> Starting Paystack…</>) : (<>Pay {formatNaira(parseFloat(depositAmount) || 0)} with Paystack</>)}
                   </button>
-                  <p className="text-[9px] text-slate-600 font-mono text-center">Simulated Paystack checkout · no real charge is made.</p>
+                  <p className="text-[9px] text-slate-600 font-mono text-center">Secured by Paystack · card, bank transfer or USSD.</p>
                 </motion.form>
               )}
             </AnimatePresence>
@@ -673,22 +713,77 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                   )}
 
                   <div>
-                    <label className="block text-xs font-mono text-slate-400 mb-2">Security Transaction PIN</label>
-                    <div className="relative">
-                      <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                      <input
-                        type="password"
-                        placeholder="••••"
-                        maxLength={4}
-                        value={withdrawPin}
-                        onChange={(e) => setWithdrawPin(e.target.value)}
-                        className="w-full bg-slate-900/80 border border-slate-800 rounded-lg py-2.5 pl-9 pr-4 font-mono text-sm text-white focus:outline-none focus:border-neon-cyan/60"
-                        required
-                      />
-                    </div>
-                    <p className="text-[9px] text-slate-500 font-mono mt-1">
-                      🔒 Default authorization simulator secure PIN: <strong className="text-neon-cyan">1234</strong>
-                    </p>
+                    <label className="block text-xs font-mono text-slate-400 mb-2">Withdrawal PIN</label>
+
+                    {pinMode === 'editing' || !profile.hasWithdrawalPin ? (
+                      <div className="space-y-2 bg-slate-900/60 border border-neon-cyan/25 rounded-lg p-3">
+                        <p className="text-[10px] font-mono text-slate-400">
+                          {profile.hasWithdrawalPin
+                            ? 'Change your 4-digit withdrawal PIN.'
+                            : 'Create a 4-digit PIN. It authorises every withdrawal, so pick something only you know.'}
+                        </p>
+                        {profile.hasWithdrawalPin && (
+                          <input
+                            type="password" inputMode="numeric" placeholder="Current PIN" maxLength={4}
+                            value={currentPin} onChange={(e) => setCurrentPin(e.target.value.replace(/\D/g, ''))}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg py-2 px-3 font-mono text-sm text-white focus:outline-none focus:border-neon-cyan/60"
+                          />
+                        )}
+                        <div className="grid grid-cols-2 gap-2">
+                          <input
+                            type="password" inputMode="numeric" placeholder="New PIN" maxLength={4}
+                            value={newPin} onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ''))}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg py-2 px-3 font-mono text-sm text-white focus:outline-none focus:border-neon-cyan/60"
+                          />
+                          <input
+                            type="password" inputMode="numeric" placeholder="Confirm" maxLength={4}
+                            value={confirmPin} onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, ''))}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg py-2 px-3 font-mono text-sm text-white focus:outline-none focus:border-neon-cyan/60"
+                          />
+                        </div>
+                        {pinError && <p className="text-[10px] font-mono text-red-400">{pinError}</p>}
+                        <div className="flex gap-2">
+                          <button
+                            type="button" onClick={savePin} disabled={pinSaving}
+                            className="flex-1 py-2 rounded-lg bg-neon-cyan/10 border border-neon-cyan/40 text-neon-cyan font-mono text-xs font-bold disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
+                          >
+                            {pinSaving ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving…</> : 'Save PIN'}
+                          </button>
+                          {profile.hasWithdrawalPin && (
+                            <button
+                              type="button"
+                              onClick={() => { setPinMode('idle'); setPinError(''); setNewPin(''); setConfirmPin(''); setCurrentPin(''); }}
+                              className="px-3 py-2 rounded-lg border border-slate-800 text-slate-400 font-mono text-xs cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="relative">
+                          <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                          <input
+                            type="password"
+                            inputMode="numeric"
+                            placeholder="••••"
+                            maxLength={4}
+                            value={withdrawPin}
+                            onChange={(e) => setWithdrawPin(e.target.value.replace(/\D/g, ''))}
+                            className="w-full bg-slate-900/80 border border-slate-800 rounded-lg py-2.5 pl-9 pr-4 font-mono text-sm text-white focus:outline-none focus:border-neon-cyan/60"
+                            required
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setPinMode('editing')}
+                          className="text-[10px] font-mono text-slate-500 hover:text-neon-cyan mt-1.5 cursor-pointer"
+                        >
+                          Change PIN
+                        </button>
+                      </>
+                    )}
                   </div>
 
                   {withdrawError && (

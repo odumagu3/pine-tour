@@ -97,6 +97,7 @@ export interface UserProfile {
   tickets: number; // Tournament tickets available (each = 1 entry)
   freeGameUsed: boolean; // Whether the lifetime free tournament entry has been consumed
   referralCode: string; // This player's shareable code ('' until one is minted)
+  hasWithdrawalPin: boolean; // Whether a withdrawal PIN is set (never the PIN itself)
   verificationStatus: 'unverified' | 'pending' | 'verified';
   verificationDetails: {
     fullName: string;

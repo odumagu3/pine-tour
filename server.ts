@@ -4,6 +4,7 @@ import express from 'express';
 import type { Request as ExpressRequest } from 'express';
 import http from 'http';
 import path from 'path';
+import crypto from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GameState, Player, PlayerColor, WhotCard, CardSuit, GameLog, Transaction, UserProfile, AntiCheatAlert, ReferralSummary } from './src/types.js';
 import {
@@ -12,11 +13,18 @@ import {
   loadProfile, persistProfile, recordTransaction, deleteProfile,
   ensureReferralCode, normalizeReferralCode, findEmailByReferralCode,
   createReferral, getPendingReferralFor, claimReferralReward, referralStats,
+  createPayment, getPayment, creditPayment, markPaymentFailed,
+  getWithdrawalPinHash, setWithdrawalPinHash,
 } from './src/db.js';
 
 const PORT = Number(process.env.PORT) || 5174;
 const app = express();
-app.use(express.json());
+// Keep the raw body around. Paystack signs webhooks as an HMAC over the exact
+// bytes it sent, so re-serializing the parsed object would break verification
+// on any key ordering or whitespace difference.
+app.use(express.json({
+  verify: (req, _res, buf) => { (req as any).rawBody = buf; },
+}));
 
 // CORS — in Option B the frontend (Vercel) and this backend (Render) are on
 // different origins. FRONTEND_ORIGIN is a comma-separated allowlist; it defaults
@@ -70,7 +78,8 @@ function getProfile(email: string): UserProfile {
     profileCache[cleanEmail] = {
       email: cleanEmail, balance: 0, totalEarnings: 0, gamesPlayed: 0, gamesWon: 0,
       highestRoll: 0, tickets: 0, freeGameUsed: false, referralCode: '',
-      verificationStatus: 'unverified', verificationDetails: null, history: [],
+      hasWithdrawalPin: false, verificationStatus: 'unverified',
+      verificationDetails: null, history: [],
     };
     ensureProfile(cleanEmail).catch(() => {});
   }
@@ -1646,90 +1655,289 @@ app.get('/api/profile', async (req, res) => {
   res.json(profile);
 });
 
-// 2. POST Simulated Payment Deposit
-app.post('/api/profile/deposit', async (req, res) => {
-  const { email, amount, method } = req.body;
-
-  if (!email || !amount || isNaN(amount) || amount <= 0) {
-    return res.status(400).json({ error: 'Invalid deposit details' });
-  }
-
-  const profile = await ensureProfile(email);
-  const txId = generateHash();
-  const txHash = 'tx_chain_' + Math.random().toString(36).substring(2, 10);
-
-  const newTx: Transaction = {
-    id: txId,
-    type: 'deposit',
-    amount: parseFloat(amount),
-    status: 'completed',
-    timestamp: new Date().toISOString(),
-    method: method || 'Credit Card',
-    txHash: txHash,
-    balanceAfter: profile.balance + parseFloat(amount),
-  };
-
-  profile.balance += parseFloat(amount);
-  addTransaction(email, newTx);
-  saveProfile(email);
-
-  res.json({ success: true, transaction: newTx, balance: profile.balance });
-});
-
-// -----------------------------------------------------------------------------
-// PAYSTACK (SIMULATED) payment gateway.
-// Mimics Paystack's real flows WITHOUT the live API or real money:
-//   • Deposit  = initialize → checkout popup → verify (credits the wallet).
-//   • Withdraw = resolve bank account → transfer (see /api/profile/withdraw).
-// Going live later = swap these handlers for real Paystack API calls + the
-// inline Paystack.js popup; the client contract stays the same.
-// -----------------------------------------------------------------------------
-interface PaystackPending { email: string; amount: number; status: 'pending' | 'success'; createdAt: number; }
-const paystackPending: Record<string, PaystackPending> = {};
-function genPaystackRef(prefix = 'T'): string {
-  return prefix + Date.now().toString().slice(-9) + Math.floor(Math.random() * 9000 + 1000);
-}
-
-// Initialize a deposit — returns the reference the checkout will pay against.
-app.post('/api/paystack/initialize', async (req, res) => {
-  const { email, amount } = req.body;
-  const amt = parseFloat(amount);
-  if (!email || isNaN(amt) || amt <= 0) return res.status(400).json({ status: false, error: 'Enter a valid amount to fund.' });
-  if (amt < 100) return res.status(400).json({ status: false, error: 'Minimum deposit is ₦100.' });
-  await ensureProfile(email);
-  const reference = genPaystackRef();
-  paystackPending[reference] = { email: String(email).toLowerCase().trim(), amount: amt, status: 'pending', createdAt: Date.now() };
-  res.json({
-    status: true,
-    reference,
-    access_code: 'ac_' + Math.random().toString(36).slice(2, 12),
-    authorization_url: `https://checkout.paystack.com/${reference}`, // sim opens an in-app popup
-    amount_kobo: Math.round(amt * 100), // Paystack works in kobo
+// 2. RETIRED: the old simulated deposit.
+//
+// This endpoint used to credit any wallet by any amount for anyone who could
+// reach the API — no payment, no authentication, no verification. That was
+// survivable while the whole economy was fake. It is not survivable now that
+// deposits are real and winnings can be withdrawn, so it is closed permanently.
+//
+// The ONLY route from money to wallet balance is now:
+//   /api/paystack/initialize → Paystack → /api/paystack/verify or the webhook
+// which credits solely on the amount Paystack itself reports.
+app.post('/api/profile/deposit', (_req, res) => {
+  res.status(410).json({
+    error: 'This endpoint has been retired. Deposits now go through Paystack checkout.',
   });
 });
 
-// Verify a deposit — credits the wallet once the checkout reports "paid".
-app.post('/api/paystack/verify', async (req, res) => {
-  const { reference } = req.body;
-  const pending = reference ? paystackPending[reference] : undefined;
-  if (!pending) return res.status(404).json({ status: false, error: 'Unknown or expired transaction reference.' });
-  const profile = await ensureProfile(pending.email);
-  if (pending.status !== 'success') {
-    pending.status = 'success';
-    profile.balance += pending.amount;
-    addTransaction(pending.email, {
-      id: generateHash(),
-      type: 'deposit',
-      amount: pending.amount,
-      status: 'completed',
-      timestamp: new Date().toISOString(),
-      method: 'Paystack',
-      txHash: reference,
-      balanceAfter: profile.balance,
-    });
-    saveProfile(pending.email);
+// -----------------------------------------------------------------------------
+// PAYSTACK — real payment gateway (deposits).
+//
+//   Deposit  = initialize (server, secret key) → Paystack Inline popup (client)
+//              → verify (server) and/or webhook → wallet credited.
+//   Withdraw = still simulated; see /api/profile/withdraw.
+//
+// Two rules this code exists to enforce:
+//   1. The AMOUNT IS NEVER TRUSTED FROM THE CLIENT at credit time. We record
+//      what we asked Paystack to charge, then credit only what Paystack says
+//      was actually paid, and only if the two agree.
+//   2. A deposit is credited EXACTLY ONCE. Both /verify and the webhook report
+//      the same payment (and the webhook retries for hours), so both funnel
+//      through creditDeposit(), which compare-and-swaps the payments row.
+// -----------------------------------------------------------------------------
+const PAYSTACK_SECRET_KEY = (process.env.PAYSTACK_SECRET_KEY || '').trim();
+const PAYSTACK_API = 'https://api.paystack.co';
+const paystackEnabled = !!PAYSTACK_SECRET_KEY;
+const MIN_DEPOSIT_NAIRA = 100;
+
+if (!paystackEnabled) {
+  console.warn('⚠️  PAYSTACK_SECRET_KEY not set — deposits are disabled.');
+} else if (!PAYSTACK_SECRET_KEY.startsWith('sk_')) {
+  console.warn('⚠️  PAYSTACK_SECRET_KEY does not look like a secret key (expected sk_test_… or sk_live_…).');
+} else if (PAYSTACK_SECRET_KEY.startsWith('sk_live_')) {
+  console.warn('🔴 Paystack is in LIVE mode — real money will move.');
+} else {
+  console.log('✅ Paystack test mode enabled.');
+}
+
+// -----------------------------------------------------------------------------
+// Withdrawal PIN — PBKDF2-SHA256, per-user salt, no new dependencies.
+// Format: pbkdf2$<iterations>$<salt-hex>$<derived-hex>, so the iteration count
+// can be raised later without invalidating PINs already set.
+// -----------------------------------------------------------------------------
+const PIN_ITERATIONS = 120000;
+
+function hashPin(pin: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.pbkdf2Sync(pin, salt, PIN_ITERATIONS, 32, 'sha256').toString('hex');
+  return `pbkdf2$${PIN_ITERATIONS}$${salt}$${derived}`;
+}
+
+function verifyPin(pin: string, stored: string): boolean {
+  const parts = (stored || '').split('$');
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2') return false;
+  const iterations = Number(parts[1]);
+  if (!Number.isFinite(iterations) || iterations < 1000) return false;
+  const derived = crypto.pbkdf2Sync(pin, parts[2], iterations, 32, 'sha256').toString('hex');
+  const a = Buffer.from(derived, 'utf8');
+  const b = Buffer.from(parts[3], 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// 4 digits, and not something an attacker would guess in their first handful of
+// tries. Rejecting these costs the player nothing and removes the worst PINs.
+const BANNED_PINS = new Set(['0000', '1111', '1234', '2222', '3333', '4444', '5555', '6666', '7777', '8888', '9999', '4321', '1212', '0123']);
+
+function pinProblem(pin: string): string | null {
+  if (!/^\d{4}$/.test(pin)) return 'PIN must be exactly 4 digits.';
+  if (BANNED_PINS.has(pin)) return 'That PIN is too easy to guess. Choose a less obvious one.';
+  return null;
+}
+
+// Our own reference. Namespaced so this app's transactions are identifiable in
+// a Paystack dashboard that may carry traffic from more than one product.
+function genPaystackRef(): string {
+  return 'PINE_' + Date.now().toString(36) + '_' + crypto.randomBytes(6).toString('hex');
+}
+
+async function paystackGet(path: string): Promise<any> {
+  const res = await fetch(`${PAYSTACK_API}${path}`, {
+    headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
+  });
+  return res.json();
+}
+
+async function paystackPost(path: string, body: unknown): Promise<any> {
+  const res = await fetch(`${PAYSTACK_API}${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+// The single path by which a Paystack payment ever becomes wallet balance.
+// Called from BOTH /verify and the webhook; safe to call any number of times.
+// `paidKobo` is what Paystack reported, not what the client claimed.
+async function creditDeposit(
+  reference: string, paidKobo: number, channel: string, currency: string,
+): Promise<{ credited: boolean; reason?: string }> {
+  const payment = await getPayment(reference);
+  if (!payment) {
+    // A charge for a reference we never issued. Should be impossible — log it
+    // loudly rather than swallowing it.
+    console.error(`Paystack ${reference}: charge for an unknown reference — ignored.`);
+    return { credited: false, reason: 'unknown-reference' };
   }
-  res.json({ status: true, data: { status: 'success', reference, amount_kobo: Math.round(pending.amount * 100) }, balance: profile.balance });
+  if (payment.status === 'credited') return { credited: false, reason: 'already-credited' };
+
+  const paidNaira = paidKobo / 100;
+
+  // Guard against a charge that doesn't match what we initialized. Underpayment
+  // is rejected outright; overpayment credits only what we asked for, and is
+  // logged loudly because it should be impossible.
+  if (currency && currency.toUpperCase() !== 'NGN') {
+    console.error(`Paystack ${reference}: unexpected currency ${currency}`);
+    return { credited: false, reason: 'currency-mismatch' };
+  }
+  if (paidNaira + 0.001 < payment.amount) {
+    console.error(`Paystack ${reference}: underpaid — expected ₦${payment.amount}, got ₦${paidNaira}`);
+    return { credited: false, reason: 'amount-mismatch' };
+  }
+  if (paidNaira > payment.amount + 0.001) {
+    console.error(`Paystack ${reference}: OVERPAID — expected ₦${payment.amount}, got ₦${paidNaira}. Crediting the expected amount.`);
+  }
+
+  // Compare-and-swap: only the caller that flips pending → credited pays out,
+  // so /verify and a retrying webhook can both fire without double-crediting.
+  const won = await creditPayment(reference, paidNaira, channel || 'unknown');
+  if (!won) return { credited: false, reason: 'already-credited' };
+
+  const profile = await ensureProfile(payment.email);
+  profile.balance += payment.amount;
+  addTransaction(payment.email, {
+    id: generateHash(),
+    type: 'deposit',
+    amount: payment.amount,
+    status: 'completed',
+    timestamp: new Date().toISOString(),
+    method: channel ? `Paystack · ${channel}` : 'Paystack',
+    txHash: reference,
+    balanceAfter: profile.balance,
+  });
+  saveProfile(payment.email);
+  console.log(`Paystack ${reference}: credited ₦${payment.amount} to ${payment.email}`);
+  return { credited: true };
+}
+
+// Initialize a deposit — returns the access code the Inline popup resumes.
+app.post('/api/paystack/initialize', async (req, res) => {
+  if (!paystackEnabled) {
+    return res.status(503).json({ status: false, error: 'Payments are not configured yet.' });
+  }
+  const { email, amount } = req.body;
+  const amt = parseFloat(amount);
+  const cleanEmail = String(email || '').toLowerCase().trim();
+  if (!cleanEmail || isNaN(amt) || amt <= 0) {
+    return res.status(400).json({ status: false, error: 'Enter a valid amount to fund.' });
+  }
+  if (amt < MIN_DEPOSIT_NAIRA) {
+    return res.status(400).json({ status: false, error: `Minimum deposit is ₦${MIN_DEPOSIT_NAIRA}.` });
+  }
+
+  await ensureProfile(cleanEmail);
+  const reference = genPaystackRef();
+
+  // Record what we intend to charge BEFORE talking to Paystack, so a payment
+  // can never arrive for a reference we have no expected amount for.
+  const recorded = await createPayment(reference, cleanEmail, amt);
+  if (!recorded) {
+    return res.status(500).json({ status: false, error: 'Could not start the payment. Please try again.' });
+  }
+
+  try {
+    const out = await paystackPost('/transaction/initialize', {
+      email: cleanEmail,
+      amount: Math.round(amt * 100), // Paystack works in kobo
+      currency: 'NGN',
+      reference,
+    });
+    if (!out?.status || !out?.data?.access_code) {
+      await markPaymentFailed(reference);
+      console.error('Paystack initialize failed:', out?.message);
+      return res.status(502).json({ status: false, error: out?.message || 'Could not reach Paystack.' });
+    }
+    res.json({
+      status: true,
+      reference,
+      access_code: out.data.access_code,
+      authorization_url: out.data.authorization_url,
+      amount_kobo: Math.round(amt * 100),
+    });
+  } catch (e) {
+    await markPaymentFailed(reference);
+    console.error('Paystack initialize error:', e);
+    res.status(502).json({ status: false, error: 'Could not reach Paystack. Please try again.' });
+  }
+});
+
+// Verify a deposit — asks Paystack what actually happened, then credits.
+// The client calls this when the popup closes; the webhook is the safety net.
+app.post('/api/paystack/verify', async (req, res) => {
+  if (!paystackEnabled) {
+    return res.status(503).json({ status: false, error: 'Payments are not configured yet.' });
+  }
+  const reference = String(req.body?.reference || '').trim();
+  if (!reference) return res.status(400).json({ status: false, error: 'Missing transaction reference.' });
+
+  const payment = await getPayment(reference);
+  if (!payment) return res.status(404).json({ status: false, error: 'Unknown transaction reference.' });
+
+  try {
+    const out = await paystackGet(`/transaction/verify/${encodeURIComponent(reference)}`);
+    const data = out?.data;
+    if (!out?.status || !data) {
+      return res.status(502).json({ status: false, error: out?.message || 'Could not verify with Paystack.' });
+    }
+
+    if (data.status !== 'success') {
+      // Deliberately NOT marked failed. 'abandoned' means "not paid yet" — the
+      // player can still finish this same reference by transfer or USSD, and
+      // the webhook must be able to credit them when they do.
+      return res.json({ status: false, data: { status: data.status }, error: `Payment ${data.status}.` });
+    }
+
+    const result = await creditDeposit(reference, Number(data.amount), String(data.channel || ''), String(data.currency || ''));
+    const profile = await ensureProfile(payment.email);
+
+    // 'already-credited' is a success from the player's point of view — the
+    // webhook simply got there first.
+    const ok = result.credited || result.reason === 'already-credited';
+    if (!ok) return res.status(400).json({ status: false, error: 'Payment could not be applied. Support has been notified.' });
+
+    res.json({ status: true, data: { status: 'success', reference }, balance: profile.balance });
+  } catch (e) {
+    console.error('Paystack verify error:', e);
+    res.status(502).json({ status: false, error: 'Could not reach Paystack. Your payment is safe — refresh in a moment.' });
+  }
+});
+
+// Paystack webhook — the authoritative notification. Bank transfer and USSD
+// settle asynchronously and may never come back through the popup at all, so
+// without this those deposits would silently never land.
+app.post('/api/paystack/webhook', async (req, res) => {
+  if (!paystackEnabled) return res.sendStatus(503);
+
+  const signature = String(req.headers['x-paystack-signature'] || '');
+  const raw: Buffer | undefined = (req as any).rawBody;
+  if (!raw || !signature) return res.sendStatus(400);
+
+  // HMAC SHA512 over the EXACT bytes Paystack sent.
+  const expected = crypto.createHmac('sha512', PAYSTACK_SECRET_KEY).update(raw).digest('hex');
+  const a = Buffer.from(expected, 'utf8');
+  const b = Buffer.from(signature, 'utf8');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    console.warn('Paystack webhook: bad signature — ignored.');
+    return res.sendStatus(401);
+  }
+
+  // Acknowledge immediately. Paystack retries anything that isn't a 200, and
+  // we never want a slow database write to trigger a storm of retries.
+  res.sendStatus(200);
+
+  try {
+    const event = req.body;
+    if (event?.event === 'charge.success' && event?.data?.reference) {
+      const d = event.data;
+      await creditDeposit(String(d.reference), Number(d.amount), String(d.channel || ''), String(d.currency || ''));
+    }
+  } catch (e) {
+    console.error('Paystack webhook handling error:', e);
+  }
 });
 
 // Resolve a bank account (for withdrawals) — returns the account holder's name.
@@ -1790,6 +1998,31 @@ app.post('/api/profile/buy-tickets', async (req, res) => {
   await awardReferralIfEligible(email).catch(err => console.error('referral reward:', err));
 
   res.json({ success: true, tickets: profile.tickets, balance: profile.balance, transaction: newTx });
+});
+
+// 2a-i. POST set or change the withdrawal PIN.
+// Changing an existing PIN requires the current one, so a hijacked session
+// can't quietly swap the PIN and then drain the wallet.
+app.post('/api/profile/set-pin', async (req, res) => {
+  const { email, newPin, currentPin } = req.body || {};
+  const cleanEmail = String(email || '').toLowerCase().trim();
+  if (!cleanEmail) return res.status(400).json({ error: 'Missing account email.' });
+
+  const problem = pinProblem(String(newPin || ''));
+  if (problem) return res.status(400).json({ error: problem });
+
+  await ensureProfile(cleanEmail);
+  const existing = await getWithdrawalPinHash(cleanEmail);
+  if (existing && !verifyPin(String(currentPin || ''), existing)) {
+    return res.status(401).json({ error: 'Current PIN is incorrect.' });
+  }
+
+  const ok = await setWithdrawalPinHash(cleanEmail, hashPin(String(newPin)));
+  if (!ok) return res.status(500).json({ error: 'Could not save your PIN. Please try again.' });
+
+  const profile = await ensureProfile(cleanEmail);
+  profile.hasWithdrawalPin = true; // keep the cached profile in step
+  res.json({ success: true });
 });
 
 // 2b-i. GET this player's referral code, shareable link and reward progress.
@@ -2129,8 +2362,12 @@ app.post('/api/profile/withdraw', async (req, res) => {
     return res.status(403).json({ error: 'Verification Required: Please submit your KYC documents in the portal before making a withdrawal.' });
   }
 
-  if (!pin || pin !== '1234') {
-    return res.status(401).json({ error: 'Invalid Transaction Security PIN. Default secure PIN is 1234.' });
+  const storedPin = await getWithdrawalPinHash(email);
+  if (!storedPin) {
+    return res.status(403).json({ error: 'Set a withdrawal PIN in the cashier before making a withdrawal.', needsPin: true });
+  }
+  if (!pin || !verifyPin(String(pin), storedPin)) {
+    return res.status(401).json({ error: 'Incorrect withdrawal PIN.' });
   }
 
   if (profile.balance < parseFloat(amount)) {
