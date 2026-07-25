@@ -53,6 +53,7 @@ interface EditableConfig {
   allHandsForcedWinner: string; // name that wins All Hands on Deck games
   ticketPrice: number;   // price per ticket
   freeGameEnabled: boolean;
+  referralRewardCap: number; // free tickets earnable per player by referring (0 = off)
   turnTimerSeconds: number;
   maxPlayers: number;
   autoBotFill: boolean;
@@ -83,6 +84,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     allHandsForcedWinner: c.allHandsForcedWinner ?? '',
     ticketPrice: Number(c.ticketPrice ?? c.ticketPackPrice ?? 0),
     freeGameEnabled: !!c.freeGameEnabled,
+    referralRewardCap: Number(c.referralRewardCap ?? 10),
     turnTimerSeconds: Number(c.turnTimerSeconds ?? 20),
     maxPlayers: Number(c.maxPlayers ?? 4),
     autoBotFill: !!c.autoBotFill,
@@ -159,6 +161,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
       allHandsForcedWinner: form.allHandsForcedWinner.trim(),
       ticketPrice: form.ticketPrice,
       freeGameEnabled: form.freeGameEnabled,
+      referralRewardCap: form.referralRewardCap,
       turnTimerSeconds: form.turnTimerSeconds,
       maxPlayers: form.maxPlayers,
       autoBotFill: form.autoBotFill,
@@ -342,6 +345,27 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
           </div>
         </div>
         <Toggle value={form.freeGameEnabled} onChange={(v) => update('freeGameEnabled', v)} label="Give new players 1 free game" />
+
+        <div>
+          <label className={labelCls}>
+            Referral Reward Cap — {form.referralRewardCap === 0
+              ? 'referral rewards paused'
+              : `up to ${form.referralRewardCap} free ticket${form.referralRewardCap === 1 ? '' : 's'} per player`}
+          </label>
+          <input
+            type="number"
+            className={field}
+            value={form.referralRewardCap}
+            onChange={(e) => update('referralRewardCap', Number(e.target.value))}
+            min={0}
+            max={1000}
+          />
+          <p className="text-[10px] text-slate-500 font-mono mt-1.5 leading-relaxed">
+            A player earns 1 free ticket each time someone who signed up through their link buys
+            tickets. Set to 0 to pause payouts — links keep working and queued referrals stay
+            eligible if you raise it again. Already-earned tickets are never taken back.
+          </p>
+        </div>
       </Section>
 
       {/* Gameplay */}

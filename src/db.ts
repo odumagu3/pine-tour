@@ -35,6 +35,7 @@ export interface AdminConfig {
   ticketPackPrice: number;
   tournamentFieldSize: number; // stored in the legacy ticket_pack_size column
   freeGameEnabled: boolean;
+  referralRewardCap: number;   // most free tickets one player can earn by referring (0 = off)
   turnTimerSeconds: number;
   maxPlayers: number;
   autoBotFill: boolean;
@@ -55,6 +56,8 @@ function rowToAdminConfig(r: any): AdminConfig {
     ticketPackPrice: Number(r.ticket_pack_price),
     tournamentFieldSize: Number(r.ticket_pack_size) || 16,
     freeGameEnabled: !!r.free_game_enabled,
+    // Pre-0003 rows have no column at all — fall back rather than yielding NaN.
+    referralRewardCap: r.referral_reward_cap == null ? 10 : Number(r.referral_reward_cap),
     turnTimerSeconds: Number(r.turn_timer_seconds),
     maxPlayers: Number(r.max_players),
     autoBotFill: !!r.auto_bot_fill,
@@ -84,6 +87,7 @@ export async function saveAdminConfig(c: AdminConfig): Promise<void> {
     ticket_pack_price: c.ticketPackPrice,
     ticket_pack_size: c.tournamentFieldSize,
     free_game_enabled: c.freeGameEnabled,
+    referral_reward_cap: c.referralRewardCap,
     turn_timer_seconds: c.turnTimerSeconds,
     max_players: c.maxPlayers,
     auto_bot_fill: c.autoBotFill,
@@ -228,7 +232,7 @@ export interface ReferralRow {
   referrerEmail: string;
   referredEmail: string;
   code: string;
-  status: 'pending' | 'rewarded' | 'capped';
+  status: 'pending' | 'rewarded';
   rewardedAt: string | null;
   createdAt: string;
 }
@@ -362,15 +366,6 @@ export async function claimReferralReward(id: string): Promise<boolean> {
     .select('id');
   if (error) { console.error('claimReferralReward failed:', error.message); return false; }
   return (data?.length ?? 0) > 0;
-}
-
-// Mark a qualifying referral that arrived after the referrer hit their cap, so
-// it is not re-examined on every future purchase.
-export async function markReferralCapped(id: string): Promise<void> {
-  if (!persistenceEnabled) return;
-  const { error } = await supabase
-    .from('referrals').update({ status: 'capped' }).eq('id', id).eq('status', 'pending');
-  if (error) console.error('markReferralCapped failed:', error.message);
 }
 
 // Counts behind the "Refer & Earn" panel and the reward cap.

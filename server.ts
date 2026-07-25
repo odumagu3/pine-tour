@@ -11,8 +11,7 @@ import {
   loadAdminConfig, saveAdminConfig,
   loadProfile, persistProfile, recordTransaction, deleteProfile,
   ensureReferralCode, normalizeReferralCode, findEmailByReferralCode,
-  createReferral, getPendingReferralFor, claimReferralReward, markReferralCapped,
-  referralStats,
+  createReferral, getPendingReferralFor, claimReferralReward, referralStats,
 } from './src/db.js';
 
 const PORT = Number(process.env.PORT) || 5174;
@@ -104,7 +103,10 @@ function addTransaction(email: string, tx: Transaction): void {
 // (freeGameEnabled / freeGameUsed) is untouched.
 // -----------------------------------------------------------------------------
 const REFERRAL_REWARD_TICKETS = 1;  // free tickets per qualifying referral
-const REFERRAL_REWARD_CAP = 10;     // most rewards one player can ever earn
+// The cap is admin-configurable (adminConfig.referralRewardCap, set in the
+// panel's Ticket Economy section); 0 turns referral rewards off entirely.
+// This constant is only the pre-load default, mirrored into adminConfig below.
+const DEFAULT_REFERRAL_REWARD_CAP = 10;
 
 // Where the shareable link points. PUBLIC_APP_URL wins (set it to the Vercel
 // origin on Render); otherwise fall back to the caller's origin, then to the
@@ -141,9 +143,11 @@ async function awardReferralIfEligible(referredEmail: string): Promise<void> {
 
   const referrer = pending.referrerEmail;
   const { rewarded } = await referralStats(referrer);
-  if (rewarded >= REFERRAL_REWARD_CAP) {
-    // Retire the row so it isn't re-examined on every future purchase.
-    await markReferralCapped(pending.id);
+  if (rewarded >= adminConfig.referralRewardCap) {
+    // Blocked by the cap — but the cap is admin-tunable, so leave the row
+    // PENDING rather than burning it. Setting the cap to 0 has to be a pause,
+    // not a permanent write-off: if the admin raises it again, this referral
+    // is still eligible the next time the invitee buys.
     return;
   }
 
@@ -203,6 +207,7 @@ const adminConfig: AdminConfig = {
   ticketPackPrice: 300, // ₦ per ticket
   tournamentFieldSize: DEFAULT_FIELD_SIZE,
   freeGameEnabled: true,
+  referralRewardCap: DEFAULT_REFERRAL_REWARD_CAP,
   turnTimerSeconds: 20,
   maxPlayers: 4,
   autoBotFill: true,
@@ -1803,8 +1808,8 @@ app.get('/api/referral', async (req, res) => {
     link: code && base ? `${base}/?ref=${code}` : '',
     invited: stats.invited,
     rewarded: stats.rewarded,
-    cap: REFERRAL_REWARD_CAP,
-    remaining: Math.max(0, REFERRAL_REWARD_CAP - stats.rewarded),
+    cap: adminConfig.referralRewardCap,
+    remaining: Math.max(0, adminConfig.referralRewardCap - stats.rewarded),
     rewardTickets: REFERRAL_REWARD_TICKETS,
   };
   res.json(summary);
@@ -1889,6 +1894,11 @@ app.post('/api/admin/config', async (req, res) => {
   // Ticket economy: `ticketPrice` is the price per ticket.
   adminConfig.ticketPackPrice = num(config.ticketPrice ?? config.ticketPackPrice, adminConfig.ticketPackPrice, 0, 100000000);
   if (typeof config.freeGameEnabled === 'boolean') adminConfig.freeGameEnabled = config.freeGameEnabled;
+  // Referral rewards: most free tickets one player can earn. 0 pauses payouts
+  // (links keep working, pending referrals stay queued for a later raise).
+  adminConfig.referralRewardCap = Math.round(
+    num(config.referralRewardCap, adminConfig.referralRewardCap, 0, 1000),
+  );
 
   // Tournament field size (seats the bracket auto-fills to). Stored rounded to a
   // multiple of 4 so tables are always full.
