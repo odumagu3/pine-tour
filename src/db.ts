@@ -36,6 +36,7 @@ export interface AdminConfig {
   tournamentFieldSize: number; // stored in the legacy ticket_pack_size column
   freeGameEnabled: boolean;
   referralRewardCap: number;   // most free tickets one player can earn by referring (0 = off)
+  allHandsAdminStart: boolean; // true = only an admin can start All Hands games
   turnTimerSeconds: number;
   maxPlayers: number;
   autoBotFill: boolean;
@@ -58,6 +59,7 @@ function rowToAdminConfig(r: any): AdminConfig {
     freeGameEnabled: !!r.free_game_enabled,
     // Pre-0003 rows have no column at all — fall back rather than yielding NaN.
     referralRewardCap: r.referral_reward_cap == null ? 10 : Number(r.referral_reward_cap),
+    allHandsAdminStart: r.all_hands_admin_start == null ? true : !!r.all_hands_admin_start,
     turnTimerSeconds: Number(r.turn_timer_seconds),
     maxPlayers: Number(r.max_players),
     autoBotFill: !!r.auto_bot_fill,
@@ -88,6 +90,7 @@ export async function saveAdminConfig(c: AdminConfig): Promise<void> {
     ticket_pack_size: c.tournamentFieldSize,
     free_game_enabled: c.freeGameEnabled,
     referral_reward_cap: c.referralRewardCap,
+    all_hands_admin_start: c.allHandsAdminStart,
     turn_timer_seconds: c.turnTimerSeconds,
     max_players: c.maxPlayers,
     auto_bot_fill: c.autoBotFill,

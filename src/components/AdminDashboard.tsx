@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { PublicConfig } from '../types.js';
 import { formatNaira } from '../currency.js';
@@ -14,6 +14,25 @@ interface WithdrawalRequest {
   accountName: string;
   status: 'pending' | 'paid' | 'rejected';
   createdAt: string;
+}
+
+interface AllHandsSeat {
+  name: string;
+  email: string;
+  isBot: boolean;
+}
+
+interface AllHandsTable {
+  status: 'empty' | 'waiting' | 'betting' | 'playing' | 'finished';
+  seats: number;
+  humans: number;
+  players: AllHandsSeat[];
+  adminStart: boolean;
+  forcedWinner: string;
+  prizeActive: boolean;
+  prize: number;
+  sponsorName: string;
+  canStart: boolean;
 }
 
 interface PlayerRow {
@@ -71,6 +90,7 @@ interface EditableConfig {
   botRosterText: string; // comma-separated bot names used to fill seats
   casualForcedWinner: string; // bot name that wins casual "Enter Arena" games
   allHandsForcedWinner: string; // name that wins All Hands on Deck games
+  allHandsAdminStart: boolean;  // only the admin may start All Hands games
   ticketPrice: number;   // price per ticket
   freeGameEnabled: boolean;
   referralRewardCap: number; // free tickets earnable per player by referring (0 = off)
@@ -102,6 +122,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     botRosterText: Array.isArray(c.botRoster) ? c.botRoster.join(', ') : '',
     casualForcedWinner: c.casualForcedWinner ?? '',
     allHandsForcedWinner: c.allHandsForcedWinner ?? '',
+    allHandsAdminStart: c.allHandsAdminStart !== false,
     ticketPrice: Number(c.ticketPrice ?? c.ticketPackPrice ?? 0),
     freeGameEnabled: !!c.freeGameEnabled,
     referralRewardCap: Number(c.referralRewardCap ?? 10),
@@ -129,6 +150,41 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
       body: JSON.stringify({ email, passcode, ...body }),
     });
     return { ok: res.ok, data: await res.json().catch(() => ({})) };
+  };
+
+  // --- All Hands live table -------------------------------------------------
+  const [ahTable, setAhTable] = useState<AllHandsTable | null>(null);
+  const [ahStarting, setAhStarting] = useState(false);
+  const [ahError, setAhError] = useState('');
+
+  const loadAhTable = async () => {
+    try {
+      const { ok, data } = await adminPost('/api/admin/all-hands/table', {});
+      if (ok) setAhTable(data);
+    } catch { /* transient — the poll will try again */ }
+  };
+
+  // Poll while the panel is unlocked so the admin watches players sit down live.
+  useEffect(() => {
+    if (!unlocked) return;
+    loadAhTable();
+    const id = window.setInterval(loadAhTable, 4000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked, passcode]);
+
+  const startAllHands = async () => {
+    setAhStarting(true);
+    setAhError('');
+    try {
+      const { ok, data } = await adminPost('/api/admin/all-hands/start', {});
+      if (!ok) setAhError(data.error || 'Could not start the game.');
+      await loadAhTable();
+    } catch {
+      setAhError('Could not reach the admin service.');
+    } finally {
+      setAhStarting(false);
+    }
   };
 
   const loadOps = async (status: 'pending' | 'all' = wdFilter) => {
@@ -237,6 +293,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
       botRoster: form.botRosterText.split(',').map(s => s.trim()).filter(Boolean),
       casualForcedWinner: form.casualForcedWinner.trim(),
       allHandsForcedWinner: form.allHandsForcedWinner.trim(),
+      allHandsAdminStart: form.allHandsAdminStart,
       ticketPrice: form.ticketPrice,
       freeGameEnabled: form.freeGameEnabled,
       referralRewardCap: form.referralRewardCap,
@@ -524,6 +581,123 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
           );
         })()}
         <p className="text-[9px] text-amber-500/80 font-mono">⚠️ Turn these off before real players/payments.</p>
+      </Section>
+
+      {/* All Hands on Deck — live table the admin starts by hand */}
+      <Section icon={<Gamepad2 className="w-4 h-4" />} title="All Hands on Deck — Live Table">
+        <Toggle
+          value={form.allHandsAdminStart}
+          onChange={(v) => update('allHandsAdminStart', v)}
+          label="Only I can start the game (needs Save)"
+        />
+
+        {!form.allHandsAdminStart && (
+          <p className="text-[10px] font-mono text-amber-500/90">
+            ⚠️ Off: the game starts by itself once enough players sit down, and any seated player can
+            force it. You won't get a chance to pick a winner first.
+          </p>
+        )}
+
+        <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="text-[10px] font-mono text-slate-500 uppercase block">Table status</span>
+              <span className={`text-lg font-bold font-display ${
+                ahTable?.status === 'playing' ? 'text-neon-green'
+                  : ahTable?.status === 'betting' ? 'text-amber-400' : 'text-slate-400'
+              }`}>
+                {ahTable?.status === 'playing' ? 'Game in progress'
+                  : ahTable?.status === 'betting' ? 'Players waiting'
+                  : ahTable?.status === 'finished' ? 'Finished'
+                  : ahTable?.status === 'waiting' ? 'Open — no one seated'
+                  : 'Table not opened'}
+              </span>
+            </div>
+            <div className="text-right">
+              <span className="text-[10px] font-mono text-slate-500 uppercase block">Real players</span>
+              <span className="text-lg font-bold font-display text-white">
+                {ahTable?.humans ?? 0}<span className="text-slate-600 text-sm"> / {ahTable?.seats ?? 4}</span>
+              </span>
+            </div>
+          </div>
+
+          {/* Who is sitting at the table right now */}
+          <div>
+            <span className="text-[10px] font-mono text-slate-500 uppercase block mb-1.5">In the arena</span>
+            {!ahTable?.players?.length ? (
+              <p className="text-[11px] font-mono text-slate-500 py-2">Nobody has taken a seat yet.</p>
+            ) : (
+              <div className="space-y-1">
+                {ahTable.players.map((p, i) => (
+                  <div key={`${p.name}-${i}`} className="flex items-center justify-between bg-slate-950/60 rounded-lg px-2.5 py-1.5 border border-slate-800/70">
+                    <div className="min-w-0">
+                      <span className="text-[11px] font-mono text-white">{p.name}</span>
+                      {p.isBot
+                        ? <span className="text-[9px] font-mono text-slate-600 ml-1.5">AI</span>
+                        : <span className="text-[9px] font-mono text-slate-600 ml-1.5 truncate">{p.email}</span>}
+                    </div>
+                    {ahTable.forcedWinner === p.name && (
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/40 flex-shrink-0">
+                        WILL WIN
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Pick the winner from who is actually seated */}
+          {!!ahTable?.players?.length && ahTable.status !== 'playing' && (
+            <div>
+              <span className="text-[10px] font-mono text-slate-500 uppercase block mb-1.5">
+                Preselect the winner
+              </span>
+              <div className="flex flex-wrap gap-1">
+                <button
+                  type="button"
+                  onClick={() => setAllHandsWinner('').then(loadAhTable)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono border ${!ahTable.forcedWinner ? 'border-slate-600 bg-slate-800 text-white' : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-white'}`}
+                >
+                  None
+                </button>
+                {ahTable.players.map((p, i) => (
+                  <button
+                    key={`pick-${p.name}-${i}`}
+                    type="button"
+                    onClick={() => setAllHandsWinner(p.name).then(loadAhTable)}
+                    className={`px-2 py-0.5 rounded text-[10px] font-mono border ${ahTable.forcedWinner === p.name ? 'border-amber-500 bg-amber-500/15 text-amber-200' : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:border-amber-500/50'}`}
+                  >
+                    {ahTable.forcedWinner === p.name && '✓ '}{p.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {ahError && (
+            <div className="p-2.5 bg-red-950/40 border border-red-500/30 rounded-lg text-[11px] text-red-400 font-mono flex items-center gap-2">
+              <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" /> {ahError}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={startAllHands}
+            disabled={ahStarting || !ahTable?.canStart}
+            className="w-full py-2.5 rounded-lg bg-neon-green/10 border border-neon-green/40 text-neon-green font-mono text-xs font-bold disabled:opacity-40 cursor-pointer flex items-center justify-center gap-2"
+          >
+            {ahStarting
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> Starting…</>
+              : ahTable?.status === 'playing'
+                ? 'Game already running'
+                : <><Gamepad2 className="w-4 h-4" /> Start the game</>}
+          </button>
+
+          <p className="text-[9px] text-slate-600 font-mono">
+            Empty seats fill with AI when you start. Updates every few seconds — no need to refresh.
+          </p>
+        </div>
       </Section>
 
       {/* Withdrawal requests — the queue an admin actually pays out by hand */}

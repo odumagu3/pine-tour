@@ -219,6 +219,7 @@ const adminConfig: AdminConfig = {
   tournamentFieldSize: DEFAULT_FIELD_SIZE,
   freeGameEnabled: true,
   referralRewardCap: DEFAULT_REFERRAL_REWARD_CAP,
+  allHandsAdminStart: true,
   turnTimerSeconds: 20,
   maxPlayers: 4,
   autoBotFill: true,
@@ -2134,6 +2135,9 @@ app.post('/api/admin/config', async (req, res) => {
   adminConfig.referralRewardCap = Math.round(
     num(config.referralRewardCap, adminConfig.referralRewardCap, 0, 1000),
   );
+  if (typeof config.allHandsAdminStart === 'boolean') {
+    adminConfig.allHandsAdminStart = config.allHandsAdminStart;
+  }
 
   // Tournament field size (seats the bracket auto-fills to). Stored rounded to a
   // multiple of 4 so tables are always full.
@@ -2242,6 +2246,67 @@ app.post('/api/tournament/casual-winner', (req, res) => {
 // TEST: set the All Hands on Deck preselected winner (a bot name or a seated
 // human's nickname) instantly. Silent: nothing is broadcast, marked or announced
 // — the pick only changes who survives to the end. In-memory only.
+// -----------------------------------------------------------------------------
+// ADMIN — All Hands on Deck live table.
+// Lets the admin watch who is sitting down, pick the winner from the actual
+// seated players, and start the game themselves.
+// -----------------------------------------------------------------------------
+
+// Who is at the table right now, and can it be started?
+app.post('/api/admin/all-hands/table', (req, res) => {
+  const { email, passcode } = req.body || {};
+  if (!adminOk(email, passcode)) return res.status(401).json({ error: 'Invalid admin email or passcode.' });
+
+  const room = gameRooms[ALL_HANDS_ROOM];
+  const seats = clampAllHandsSize(allHandsSize);
+  const players = (room?.players ?? []).map(p => ({
+    name: p.name,
+    email: p.isBot ? '' : p.id,
+    isBot: p.isBot,
+    cardsCount: p.cardsCount,
+  }));
+  const humans = players.filter(p => !p.isBot).length;
+  const prize = allHandsPrizeInfo();
+
+  res.json({
+    success: true,
+    status: room ? room.status : 'empty',
+    seats,
+    humans,
+    players,
+    adminStart: adminConfig.allHandsAdminStart,
+    forcedWinner: allHandsForcedWinnerName,
+    prizeActive: prize.active,
+    prize: prize.prize,
+    sponsorName: prize.sponsorName,
+    // Startable only when someone real is actually sitting there.
+    canStart: !!room && room.status !== 'playing' && humans > 0 && prize.active,
+  });
+});
+
+// Deal the cards. Fills any empty seats with bots, exactly like the old
+// player-triggered "Play now" did.
+app.post('/api/admin/all-hands/start', (req, res) => {
+  const { email, passcode } = req.body || {};
+  if (!adminOk(email, passcode)) return res.status(401).json({ error: 'Invalid admin email or passcode.' });
+
+  const room = gameRooms[ALL_HANDS_ROOM];
+  if (!room) return res.status(400).json({ error: 'Nobody has opened the table yet.' });
+  if (room.status === 'playing') return res.status(409).json({ error: 'A game is already in progress.' });
+  if (!allHandsPrizeInfo().active) {
+    return res.status(400).json({ error: 'Set a sponsor and prize before starting a game.' });
+  }
+  if (room.status === 'finished') resetAllHandsRoom(room);
+  if (!room.players.some(p => !p.isBot)) {
+    return res.status(400).json({ error: 'No real players are seated yet.' });
+  }
+
+  startAllHands(room);
+  broadcastRoomState(ALL_HANDS_ROOM);
+  console.log(`All Hands started by admin ${String(email).toLowerCase()} — ${room.players.length} seated.`);
+  res.json({ success: true, status: room.status });
+});
+
 app.post('/api/all-hands/force-winner', (req, res) => {
   if (!requireAdmin(req, res)) return;
   allHandsForcedWinnerName = typeof req.body.name === 'string' ? req.body.name.trim() : '';
@@ -2543,6 +2608,20 @@ wss.on('connection', async (ws: WebSocket, req) => {
   // the heartbeat below can drop truly dead connections.
   (ws as any).isAlive = true;
   ws.on('pong', () => { (ws as any).isAlive = true; });
+
+  // Attach the message listener BEFORE any await. Clients send as soon as the
+  // socket opens (App.tsx fires 'enter-all-hands' from onopen), and anything
+  // that arrives while this handler is awaiting has no listener yet and is
+  // dropped on the floor — a first-time player, whose profile isn't cached and
+  // so takes a database round-trip, could tap Enter and be silently ignored.
+  // Buffer until setup finishes, then replay in order.
+  let socketReady = false;
+  const queued: string[] = [];
+  ws.on('message', (messageStr: string) => {
+    if (!socketReady) { queued.push(messageStr); return; }
+    handleMessage(messageStr);
+  });
+
   await ensureProfile(userEmail); // load into cache
 
   // All Hands on Deck is the ONLY game now — everyone connects straight to the
@@ -2555,7 +2634,12 @@ wss.on('connection', async (ws: WebSocket, req) => {
   activeConnections[connId] = { ws, email: userEmail, roomId: ALL_HANDS_ROOM };
   broadcastRoomState(ALL_HANDS_ROOM);
 
-  ws.on('message', (messageStr: string) => {
+  // Setup is done — start handling live, then drain anything that arrived while
+  // we were loading the profile.
+  socketReady = true;
+  while (queued.length) handleMessage(queued.shift() as string);
+
+  function handleMessage(messageStr: string) {
     let msg: any;
     try {
       msg = JSON.parse(messageStr);
@@ -2597,8 +2681,10 @@ wss.on('connection', async (ws: WebSocket, req) => {
       }
       room.status = 'betting';
       setConnRoomForEmail(userEmail, ALL_HANDS_ROOM);
-      // Auto-start once humans alone fill the configured table size.
-      if (room.players.filter(p => !p.isBot).length >= clampAllHandsSize(allHandsSize)) {
+      // Auto-start once humans alone fill the configured table size — unless the
+      // admin holds the whistle, in which case the table just waits.
+      if (!adminConfig.allHandsAdminStart
+          && room.players.filter(p => !p.isBot).length >= clampAllHandsSize(allHandsSize)) {
         startAllHands(room);
       }
       broadcastRoomState(ALL_HANDS_ROOM);
@@ -2609,6 +2695,10 @@ wss.on('connection', async (ws: WebSocket, req) => {
     if (msg.type === 'start-all-hands') {
       const room = gameRooms[ALL_HANDS_ROOM];
       if (!room || room.status === 'playing' || room.status === 'finished') return;
+      if (adminConfig.allHandsAdminStart) {
+        ws.send(JSON.stringify({ type: 'warning', message: 'The host starts this game — hang tight, it will begin shortly.' }));
+        return;
+      }
       if (!room.players.some(p => p.id === userEmail && !p.isBot)) {
         ws.send(JSON.stringify({ type: 'warning', message: 'Join the table before starting.' }));
         return;
@@ -2815,7 +2905,7 @@ wss.on('connection', async (ws: WebSocket, req) => {
       }
 
     }
-  });
+  }
 
   ws.on('close', () => {
     const roomId = activeConnections[connId]?.roomId;
