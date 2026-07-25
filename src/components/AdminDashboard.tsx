@@ -23,17 +23,23 @@ interface AllHandsSeat {
   isBot: boolean;
 }
 
-interface AllHandsTable {
-  status: 'empty' | 'waiting' | 'betting' | 'playing' | 'finished';
-  seats: number;
-  humans: number;
+interface AllHandsTableRow {
+  roomId: string;
+  table: number;
+  status: 'waiting' | 'betting' | 'playing' | 'finished';
   players: AllHandsSeat[];
+  humans: number;
+  canStart: boolean;
+}
+
+interface AllHandsTable {
+  seats: number;
+  tables: AllHandsTableRow[];
   adminStart: boolean;
   forcedWinner: string;
   prizeActive: boolean;
   prize: number;
   sponsorName: string;
-  canStart: boolean;
 }
 
 interface PlayerRow {
@@ -155,7 +161,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
 
   // --- All Hands live table -------------------------------------------------
   const [ahTable, setAhTable] = useState<AllHandsTable | null>(null);
-  const [ahStarting, setAhStarting] = useState(false);
+  const [ahStarting, setAhStarting] = useState<string | null>(null);
   const [ahError, setAhError] = useState('');
 
   const loadAhTable = async () => {
@@ -174,17 +180,17 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked, passcode]);
 
-  const startAllHands = async () => {
-    setAhStarting(true);
+  const startAllHands = async (roomId: string) => {
+    setAhStarting(roomId);
     setAhError('');
     try {
-      const { ok, data } = await adminPost('/api/admin/all-hands/start', {});
+      const { ok, data } = await adminPost('/api/admin/all-hands/start', { roomId });
       if (!ok) setAhError(data.error || 'Could not start the game.');
       await loadAhTable();
     } catch {
       setAhError('Could not reach the admin service.');
     } finally {
-      setAhStarting(false);
+      setAhStarting(null);
     }
   };
 
@@ -599,106 +605,122 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
           </p>
         )}
 
-        <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <span className="text-[10px] font-mono text-slate-500 uppercase block">Table status</span>
-              <span className={`text-lg font-bold font-display ${
-                ahTable?.status === 'playing' ? 'text-neon-green'
-                  : ahTable?.status === 'betting' ? 'text-amber-400' : 'text-slate-400'
-              }`}>
-                {ahTable?.status === 'playing' ? 'Game in progress'
-                  : ahTable?.status === 'betting' ? 'Players waiting'
-                  : ahTable?.status === 'finished' ? 'Finished'
-                  : ahTable?.status === 'waiting' ? 'Open — no one seated'
-                  : 'Table not opened'}
-              </span>
-            </div>
-            <div className="text-right">
-              <span className="text-[10px] font-mono text-slate-500 uppercase block">Real players</span>
-              <span className="text-lg font-bold font-display text-white">
-                {ahTable?.humans ?? 0}<span className="text-slate-600 text-sm"> / {ahTable?.seats ?? 4}</span>
-              </span>
-            </div>
+        {ahError && (
+          <div className="p-2.5 bg-red-950/40 border border-red-500/30 rounded-lg text-[11px] text-red-400 font-mono flex items-center gap-2">
+            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" /> {ahError}
           </div>
+        )}
 
-          {/* Who is sitting at the table right now */}
-          <div>
-            <span className="text-[10px] font-mono text-slate-500 uppercase block mb-1.5">In the arena</span>
-            {!ahTable?.players?.length ? (
-              <p className="text-[11px] font-mono text-slate-500 py-2">Nobody has taken a seat yet.</p>
-            ) : (
-              <div className="space-y-1">
-                {ahTable.players.map((p, i) => (
-                  <div key={`${p.name}-${i}`} className="flex items-center justify-between bg-slate-950/60 rounded-lg px-2.5 py-1.5 border border-slate-800/70">
-                    <div className="min-w-0">
-                      <span className="text-[11px] font-mono text-white">{p.name}</span>
-                      {p.isBot
-                        ? <span className="text-[9px] font-mono text-slate-600 ml-1.5">AI</span>
-                        : <span className="text-[9px] font-mono text-slate-600 ml-1.5 truncate">{p.email}</span>}
-                    </div>
-                    {ahTable.forcedWinner === p.name && (
-                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/40 flex-shrink-0">
-                        WILL WIN
-                      </span>
-                    )}
+        {/* Selected winner shows here too — they may be on any table, or not
+            seated anywhere yet. */}
+        {!!ahTable?.forcedWinner && (
+          <div className="flex items-center justify-between bg-amber-500/5 border border-amber-500/30 rounded-lg px-3 py-2">
+            <span className="text-[10px] font-mono text-amber-300">
+              Preselected winner: <strong>{ahTable.forcedWinner}</strong> — wins whichever table they sit at.
+            </span>
+            <button
+              type="button"
+              onClick={() => setAllHandsWinner('').then(loadAhTable)}
+              className="text-[10px] font-mono text-slate-400 hover:text-white cursor-pointer flex-shrink-0 ml-2"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+
+        {!ahTable?.tables?.length ? (
+          <p className="text-[11px] font-mono text-slate-500 py-3 text-center">
+            No tables open yet — one opens when the first player enters.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {ahTable.tables.map(t => (
+              <div key={t.roomId} className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] font-mono text-slate-500 uppercase block">Table {t.table}</span>
+                    <span className={`text-md font-bold font-display ${
+                      t.status === 'playing' ? 'text-neon-green'
+                        : t.status === 'betting' ? 'text-amber-400' : 'text-slate-400'
+                    }`}>
+                      {t.status === 'playing' ? 'Game in progress'
+                        : t.status === 'betting' ? 'Players waiting'
+                        : t.status === 'finished' ? 'Finished'
+                        : 'Open — no one seated'}
+                    </span>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
+                  <div className="text-right">
+                    <span className="text-[10px] font-mono text-slate-500 uppercase block">Real players</span>
+                    <span className="text-md font-bold font-display text-white">
+                      {t.humans}<span className="text-slate-600 text-sm"> / {ahTable.seats}</span>
+                    </span>
+                  </div>
+                </div>
 
-          {/* Pick the winner from who is actually seated */}
-          {!!ahTable?.players?.length && ahTable.status !== 'playing' && (
-            <div>
-              <span className="text-[10px] font-mono text-slate-500 uppercase block mb-1.5">
-                Preselect the winner
-              </span>
-              <div className="flex flex-wrap gap-1">
+                {!t.players.length ? (
+                  <p className="text-[11px] font-mono text-slate-500">Nobody seated.</p>
+                ) : (
+                  <div className="space-y-1">
+                    {t.players.map((p, i) => (
+                      <div key={`${t.roomId}-${p.name}-${i}`} className="flex items-center justify-between bg-slate-950/60 rounded-lg px-2.5 py-1.5 border border-slate-800/70">
+                        <div className="min-w-0">
+                          <span className="text-[11px] font-mono text-white">{p.name}</span>
+                          {p.isBot
+                            ? <span className="text-[9px] font-mono text-slate-600 ml-1.5">AI</span>
+                            : <span className="text-[9px] font-mono text-slate-600 ml-1.5 truncate">{p.email}</span>}
+                        </div>
+                        {ahTable.forcedWinner === p.name && (
+                          <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/40 flex-shrink-0">
+                            WILL WIN
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Pick the winner from whoever is seated at THIS table */}
+                {!!t.players.length && t.status !== 'playing' && (
+                  <div>
+                    <span className="text-[10px] font-mono text-slate-500 uppercase block mb-1.5">
+                      Preselect the winner
+                    </span>
+                    <div className="flex flex-wrap gap-1">
+                      {t.players.map((p, i) => (
+                        <button
+                          key={`pick-${t.roomId}-${p.name}-${i}`}
+                          type="button"
+                          onClick={() => setAllHandsWinner(p.name).then(loadAhTable)}
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono border ${ahTable.forcedWinner === p.name ? 'border-amber-500 bg-amber-500/15 text-amber-200' : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:border-amber-500/50'}`}
+                        >
+                          {ahTable.forcedWinner === p.name && '✓ '}{p.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <button
                   type="button"
-                  onClick={() => setAllHandsWinner('').then(loadAhTable)}
-                  className={`px-2 py-0.5 rounded text-[10px] font-mono border ${!ahTable.forcedWinner ? 'border-slate-600 bg-slate-800 text-white' : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-white'}`}
+                  onClick={() => startAllHands(t.roomId)}
+                  disabled={ahStarting === t.roomId || !t.canStart}
+                  className="w-full py-2 rounded-lg bg-neon-green/10 border border-neon-green/40 text-neon-green font-mono text-xs font-bold disabled:opacity-40 cursor-pointer flex items-center justify-center gap-2"
                 >
-                  None
+                  {ahStarting === t.roomId
+                    ? <><Loader2 className="w-4 h-4 animate-spin" /> Starting…</>
+                    : t.status === 'playing'
+                      ? 'Game already running'
+                      : <><Gamepad2 className="w-4 h-4" /> Start table {t.table}</>}
                 </button>
-                {ahTable.players.map((p, i) => (
-                  <button
-                    key={`pick-${p.name}-${i}`}
-                    type="button"
-                    onClick={() => setAllHandsWinner(p.name).then(loadAhTable)}
-                    className={`px-2 py-0.5 rounded text-[10px] font-mono border ${ahTable.forcedWinner === p.name ? 'border-amber-500 bg-amber-500/15 text-amber-200' : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:border-amber-500/50'}`}
-                  >
-                    {ahTable.forcedWinner === p.name && '✓ '}{p.name}
-                  </button>
-                ))}
               </div>
-            </div>
-          )}
+            ))}
+          </div>
+        )}
 
-          {ahError && (
-            <div className="p-2.5 bg-red-950/40 border border-red-500/30 rounded-lg text-[11px] text-red-400 font-mono flex items-center gap-2">
-              <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" /> {ahError}
-            </div>
-          )}
-
-          <button
-            type="button"
-            onClick={startAllHands}
-            disabled={ahStarting || !ahTable?.canStart}
-            className="w-full py-2.5 rounded-lg bg-neon-green/10 border border-neon-green/40 text-neon-green font-mono text-xs font-bold disabled:opacity-40 cursor-pointer flex items-center justify-center gap-2"
-          >
-            {ahStarting
-              ? <><Loader2 className="w-4 h-4 animate-spin" /> Starting…</>
-              : ahTable?.status === 'playing'
-                ? 'Game already running'
-                : <><Gamepad2 className="w-4 h-4" /> Start the game</>}
-          </button>
-
-          <p className="text-[9px] text-slate-600 font-mono">
-            Empty seats fill with AI when you start. Updates every few seconds — no need to refresh.
-          </p>
-        </div>
+        <p className="text-[9px] text-slate-600 font-mono">
+          A 5th player opens table 2 rather than waiting. Empty seats fill with AI when you start.
+          Updates every few seconds — no need to refresh.
+        </p>
       </Section>
 
       {/* Withdrawal requests — the queue an admin actually pays out by hand */}

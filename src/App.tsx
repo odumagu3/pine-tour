@@ -291,6 +291,11 @@ export default function App() {
             setGameplayNotice((prev) => (prev === data.message ? null : prev));
           }, 4000);
           break;
+        case 'profile-updated':
+          // The server changed the wallet or ticket count (e.g. an All Hands
+          // entry was paid for) — pull the new numbers.
+          fetchProfile();
+          break;
         case 'referral-reward':
           // Someone we invited just bought tickets — the free ticket has already
           // landed on the server, so pull the profile to show the new count.

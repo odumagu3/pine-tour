@@ -474,7 +474,8 @@ function resetRoomForNewTournament(room: GameState) {
 // knowledge — it is never sent to clients, logged, or announced anywhere.
 function isForcedWinner(roomId: string, p: Player): boolean {
   if (tournamentTableIds.has(roomId)) return !!tournament && tournament.forcedWinnerId === p.id;
-  if (roomId === ALL_HANDS_ROOM) return !!allHandsForcedWinnerName && p.name === allHandsForcedWinnerName;
+  // Applies on ANY All Hands table — the pick follows the player wherever they sit.
+  if (isAllHandsRoom(roomId)) return !!allHandsForcedWinnerName && p.name === allHandsForcedWinnerName;
   return !!casualForcedWinnerName && p.name === casualForcedWinnerName;
 }
 function forcedPlayerInRoom(roomId: string, room: GameState): Player | undefined {
@@ -579,7 +580,9 @@ function endWhotGame(roomId: string, winnerId: string) {
   // All Hands: tell everyone still subscribed (winner + spectating eliminees)
   // who took the prize so clients can show the last-player-standing result.
   if (isAllHands) {
-    broadcastEventToRoom(ALL_HANDS_ROOM, {
+    // THIS table's room — not a fixed one, or table 2's result would land on
+    // table 1's screens.
+    broadcastEventToRoom(roomId, {
       type: 'all-hands-winner',
       winnerName: winner ? winner.name : 'Unknown',
       winnerId,
@@ -642,7 +645,7 @@ function resolveMarketExhausted(roomId: string) {
   // can play the count-up + elimination moment. Sent before removal so the
   // payload includes the eliminated player.
   if (isAllHands) {
-    broadcastEventToRoom(ALL_HANDS_ROOM, {
+    broadcastEventToRoom(roomId, {
       type: 'all-hands-showdown',
       eliminatedName: eliminated.name,
       maxSum,
@@ -673,7 +676,9 @@ function resolveMarketExhausted(roomId: string) {
       setConnRoomForEmail(eliminated.id, TOURNEY_OUT);
       sendToEmail(eliminated.id, { type: 'tournament-eliminated', round: tournament?.currentRound });
     } else if (isAllHands) {
-      setConnRoomForEmail(eliminated.id, ALL_HANDS_ROOM);
+      // Keep them on the table they were knocked out of, so they spectate the
+      // rest of THEIR game.
+      setConnRoomForEmail(eliminated.id, roomId);
       sendToEmail(eliminated.id, { type: 'all-hands-eliminated', total: maxSum, remaining: room.players.length });
     } else {
       sendToEmail(eliminated.id, { type: 'warning', message: `Market emptied — you had the highest card total (${maxSum}) and were eliminated.` });
@@ -1032,8 +1037,32 @@ function tournamentTargetSize(): number {
 // sponsor prize. Reuses the core Whot engine; only the win/elimination rules
 // differ (branched on room.mode === 'all-hands').
 // =============================================================================
-const ALL_HANDS_ROOM = '__all_hands'; // the single live All Hands table
+// All Hands runs as MANY tables, numbered __all_hands_1, __all_hands_2, …
+// A player takes the first table with a free seat; when every table is full or
+// already playing, a new one opens. So a 5th player never waits — they get
+// their own table, and empty seats fill with AI when it starts.
+const ALL_HANDS_PREFIX = '__all_hands_';
 const ALL_HANDS_LOBBY = '__ah_lobby'; // connected, choosing to enter
+
+function isAllHandsRoom(roomId: string): boolean {
+  return roomId.startsWith(ALL_HANDS_PREFIX);
+}
+
+// Live tables, in table order (1, 2, 3 …).
+function allHandsTables(): GameState[] {
+  return Object.values(gameRooms)
+    .filter(r => isAllHandsRoom(r.roomId))
+    .sort((a, b) => allHandsTableNumber(a.roomId) - allHandsTableNumber(b.roomId));
+}
+
+function allHandsTableNumber(roomId: string): number {
+  return Number(roomId.slice(ALL_HANDS_PREFIX.length)) || 0;
+}
+
+// The table this player is currently sitting at, if any.
+function allHandsTableFor(email: string): GameState | null {
+  return allHandsTables().find(t => t.players.some(p => p.id === email && !p.isBot)) ?? null;
+}
 
 // Starting seat count (2–4). In-memory only for now (no schema migration); the
 // prize/sponsor are taken from the arena's configured fixed prize.
@@ -1066,12 +1095,13 @@ function broadcastEventToRoom(roomId: string, obj: any) {
   });
 }
 
-function getOrCreateAllHandsRoom(): GameState {
-  let room = gameRooms[ALL_HANDS_ROOM];
+// Create a specific numbered table.
+function createAllHandsTable(roomId: string): GameState {
+  let room = gameRooms[roomId];
   if (!room) {
     const { sponsorName, prize } = allHandsPrizeInfo();
-    room = gameRooms[ALL_HANDS_ROOM] = {
-      roomId: ALL_HANDS_ROOM,
+    room = gameRooms[roomId] = {
+      roomId,
       status: 'waiting',
       mode: 'all-hands',
       players: [],
@@ -1097,6 +1127,43 @@ function getOrCreateAllHandsRoom(): GameState {
     };
   }
   return room;
+}
+
+// The table a player should be seated at: the first one still open with a free
+// seat, otherwise a brand-new table. This is what stops a 5th player being
+// turned away — they simply open table 2.
+function findOrCreateSeatableTable(): GameState {
+  const cap = clampAllHandsSize(allHandsSize);
+  const open = allHandsTables().find(t =>
+    (t.status === 'waiting' || t.status === 'betting') && t.players.length < cap
+  );
+  if (open) return open;
+
+  // Every table is full or mid-game — open the next one.
+  const used = new Set(allHandsTables().map(t => allHandsTableNumber(t.roomId)));
+  let n = 1;
+  while (used.has(n)) n++;
+  return createAllHandsTable(`${ALL_HANDS_PREFIX}${n}`);
+}
+
+// A table for a connected player to LOOK at when they haven't sat down yet.
+// Never creates one — an idle viewer shouldn't spawn empty tables.
+function viewableAllHandsRoomId(): string {
+  const tables = allHandsTables();
+  const open = tables.find(t => t.status === 'waiting' || t.status === 'betting');
+  return (open ?? tables[0])?.roomId ?? `${ALL_HANDS_PREFIX}1`;
+}
+
+// Retire finished, empty tables beyond the first so they don't pile up forever.
+function pruneAllHandsTables(): void {
+  const tables = allHandsTables();
+  for (const t of tables) {
+    const humans = t.players.filter(p => !p.isBot).length;
+    const watchers = Object.values(activeConnections).some(c => c.roomId === t.roomId);
+    if (allHandsTableNumber(t.roomId) > 1 && t.status === 'finished' && humans === 0 && !watchers) {
+      delete gameRooms[t.roomId];
+    }
+  }
 }
 
 // Fill empty seats with bots up to the configured All Hands size (2–4).
@@ -2348,30 +2415,37 @@ app.post('/api/admin/all-hands/table', (req, res) => {
   const { email, passcode } = req.body || {};
   if (!adminOk(email, passcode)) return res.status(401).json({ error: 'Invalid admin email or passcode.' });
 
-  const room = gameRooms[ALL_HANDS_ROOM];
   const seats = clampAllHandsSize(allHandsSize);
-  const players = (room?.players ?? []).map(p => ({
-    name: p.name,
-    email: p.isBot ? '' : p.id,
-    isBot: p.isBot,
-    cardsCount: p.cardsCount,
-  }));
-  const humans = players.filter(p => !p.isBot).length;
   const prize = allHandsPrizeInfo();
+
+  const tables = allHandsTables().map(room => {
+    const players = room.players.map(p => ({
+      name: p.name,
+      email: p.isBot ? '' : p.id,
+      isBot: p.isBot,
+      cardsCount: p.cardsCount,
+    }));
+    const humans = players.filter(p => !p.isBot).length;
+    return {
+      roomId: room.roomId,
+      table: allHandsTableNumber(room.roomId),
+      status: room.status,
+      players,
+      humans,
+      // Startable only when someone real is actually sitting there.
+      canStart: room.status !== 'playing' && humans > 0 && prize.active,
+    };
+  });
 
   res.json({
     success: true,
-    status: room ? room.status : 'empty',
     seats,
-    humans,
-    players,
+    tables,
     adminStart: adminConfig.allHandsAdminStart,
     forcedWinner: allHandsForcedWinnerName,
     prizeActive: prize.active,
     prize: prize.prize,
     sponsorName: prize.sponsorName,
-    // Startable only when someone real is actually sitting there.
-    canStart: !!room && room.status !== 'playing' && humans > 0 && prize.active,
   });
 });
 
@@ -2381,21 +2455,28 @@ app.post('/api/admin/all-hands/start', (req, res) => {
   const { email, passcode } = req.body || {};
   if (!adminOk(email, passcode)) return res.status(401).json({ error: 'Invalid admin email or passcode.' });
 
-  const room = gameRooms[ALL_HANDS_ROOM];
-  if (!room) return res.status(400).json({ error: 'Nobody has opened the table yet.' });
-  if (room.status === 'playing') return res.status(409).json({ error: 'A game is already in progress.' });
+  // Which table? Explicit roomId, else the first startable one.
+  const requested = String(req.body?.roomId || '').trim();
+  const room = requested
+    ? gameRooms[requested]
+    : allHandsTables().find(t => t.status !== 'playing' && t.players.some(p => !p.isBot));
+
+  if (!room || !isAllHandsRoom(room.roomId)) {
+    return res.status(400).json({ error: 'No table with players waiting.' });
+  }
+  if (room.status === 'playing') return res.status(409).json({ error: 'That table is already playing.' });
   if (!allHandsPrizeInfo().active) {
     return res.status(400).json({ error: 'Set a sponsor and prize before starting a game.' });
   }
   if (room.status === 'finished') resetAllHandsRoom(room);
   if (!room.players.some(p => !p.isBot)) {
-    return res.status(400).json({ error: 'No real players are seated yet.' });
+    return res.status(400).json({ error: 'No real players are seated at that table.' });
   }
 
   startAllHands(room);
-  broadcastRoomState(ALL_HANDS_ROOM);
-  console.log(`All Hands started by admin ${String(email).toLowerCase()} — ${room.players.length} seated.`);
-  res.json({ success: true, status: room.status });
+  broadcastRoomState(room.roomId);
+  console.log(`All Hands ${room.roomId} started by admin ${String(email).toLowerCase()} — ${room.players.length} seated.`);
+  res.json({ success: true, roomId: room.roomId, status: room.status });
 });
 
 app.post('/api/all-hands/force-winner', (req, res) => {
@@ -2729,11 +2810,15 @@ wss.on('connection', async (ws: WebSocket, req) => {
   // survival table. (The bracket/tournament engine is retired; its code is left
   // dormant/unreachable.) Reconnecting seated players resume; everyone else lands
   // in the table view (lobby if waiting, spectating if a game is already running).
-  const ahRoom = getOrCreateAllHandsRoom();
-  const seated = ahRoom.players.find(x => x.id === userEmail);
+  // A reconnecting player returns to THEIR table; everyone else just gets a
+  // table to look at (viewing never creates one — idle viewers shouldn't spawn
+  // empty tables).
+  const ownTable = allHandsTableFor(userEmail);
+  const seated = ownTable?.players.find(x => x.id === userEmail);
   if (seated) { seated.isConnected = true; seated.name = userName; }
-  activeConnections[connId] = { ws, email: userEmail, roomId: ALL_HANDS_ROOM };
-  broadcastRoomState(ALL_HANDS_ROOM);
+  const viewRoomId = ownTable?.roomId ?? viewableAllHandsRoomId();
+  activeConnections[connId] = { ws, email: userEmail, roomId: viewRoomId };
+  if (gameRooms[viewRoomId]) broadcastRoomState(viewRoomId);
 
   // Setup is done — start handling live, then drain anything that arrived while
   // we were loading the profile.
@@ -2760,52 +2845,78 @@ wss.on('connection', async (ws: WebSocket, req) => {
       return;
     }
 
-    // Join the All Hands on Deck table (handled before the room guard because the
-    // player isn't seated yet). Auto-starts once enough humans join to fill it.
+    // Take a seat at All Hands. Handled before the room guard because the player
+    // isn't seated yet. Costs the lifetime free game if they still have it,
+    // otherwise one ticket. A 5th player opens a fresh table rather than being
+    // turned away.
     if (msg.type === 'enter-all-hands') {
-      const room = getOrCreateAllHandsRoom();
-      if (room.status === 'finished') resetAllHandsRoom(room);
-      if (room.status === 'playing') {
-        setConnRoomForEmail(userEmail, ALL_HANDS_ROOM);
-        ws.send(JSON.stringify({ type: 'warning', message: 'A game is already in progress — you can watch, then join the next one.' }));
-        broadcastRoomState(ALL_HANDS_ROOM);
-        return;
-      }
       if (!allHandsPrizeInfo().active) {
         ws.send(JSON.stringify({ type: 'error', message: 'All Hands on Deck is not available right now.' }));
         return;
       }
-      const seat = seatAllHandsHuman(room, userEmail, userName);
-      if (!seat) {
-        ws.send(JSON.stringify({ type: 'warning', message: 'The All Hands table is full.' }));
+
+      // Already sitting somewhere? Rejoin it — never charge twice.
+      const existing = allHandsTableFor(userEmail);
+      if (existing) {
+        setConnRoomForEmail(userEmail, existing.roomId);
+        broadcastRoomState(existing.roomId);
         return;
       }
+
+      pruneAllHandsTables();
+      const room = findOrCreateSeatableTable();
+
+      // Check they can pay BEFORE seating, so nobody is seated for free and
+      // nobody is charged for a seat they didn't get.
+      const profile = getProfile(userEmail);
+      const useFreeGame = adminConfig.freeGameEnabled && !profile.freeGameUsed;
+      if (!useFreeGame && profile.tickets <= 0) {
+        ws.send(JSON.stringify({
+          type: 'error',
+          message: 'You have no tickets left. Buy tickets in the Cashier to play.',
+        }));
+        return;
+      }
+
+      const seat = seatAllHandsHuman(room, userEmail, userName);
+      if (!seat) {
+        // Shouldn't happen (we picked a table with room), but never charge if it does.
+        ws.send(JSON.stringify({ type: 'warning', message: 'That table just filled up — try again.' }));
+        return;
+      }
+
+      // Seat secured — now take the entry.
+      if (useFreeGame) {
+        profile.freeGameUsed = true;
+      } else {
+        profile.tickets -= 1;
+      }
+      saveProfile(userEmail);
+      // Tell the client to re-read the wallet so the ticket count drops live.
+      sendToEmail(userEmail, { type: 'profile-updated' });
+
       room.status = 'betting';
-      setConnRoomForEmail(userEmail, ALL_HANDS_ROOM);
-      // Auto-start once humans alone fill the configured table size — unless the
-      // admin holds the whistle, in which case the table just waits.
+      setConnRoomForEmail(userEmail, room.roomId);
+      // Auto-start once humans alone fill the table — unless the admin holds the
+      // whistle, in which case it waits for them.
       if (!adminConfig.allHandsAdminStart
           && room.players.filter(p => !p.isBot).length >= clampAllHandsSize(allHandsSize)) {
         startAllHands(room);
       }
-      broadcastRoomState(ALL_HANDS_ROOM);
+      broadcastRoomState(room.roomId);
       return;
     }
 
     // Fill remaining seats with bots and deal immediately (the "Play now" button).
     if (msg.type === 'start-all-hands') {
-      const room = gameRooms[ALL_HANDS_ROOM];
+      const room = allHandsTableFor(userEmail);
       if (!room || room.status === 'playing' || room.status === 'finished') return;
       if (adminConfig.allHandsAdminStart) {
         ws.send(JSON.stringify({ type: 'warning', message: 'The host starts this game — hang tight, it will begin shortly.' }));
         return;
       }
-      if (!room.players.some(p => p.id === userEmail && !p.isBot)) {
-        ws.send(JSON.stringify({ type: 'warning', message: 'Join the table before starting.' }));
-        return;
-      }
       startAllHands(room);
-      broadcastRoomState(ALL_HANDS_ROOM);
+      broadcastRoomState(room.roomId);
       return;
     }
 
