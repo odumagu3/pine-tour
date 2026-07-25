@@ -29,6 +29,7 @@ interface AllHandsTableRow {
   status: 'waiting' | 'betting' | 'playing' | 'finished';
   players: AllHandsSeat[];
   humans: number;
+  prize: number;
   canStart: boolean;
 }
 
@@ -40,6 +41,9 @@ interface AllHandsTable {
   botRoster: string[];
   prizeActive: boolean;
   prize: number;
+  prizePool: number;
+  prizeRemaining: number;
+  playingCount: number;
   sponsorName: string;
 }
 
@@ -206,11 +210,14 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     await loadAhTable();
   };
 
-  const startAllHands = async (roomId: string) => {
-    setAhStarting(roomId);
+  // roomId starts one table; { all: true } starts every waiting table together
+  // so the prize split is settled before any card is dealt.
+  const startAllHands = async (roomId: string | null) => {
+    setAhStarting(roomId ?? '__all');
     setAhError('');
     try {
-      const { ok, data } = await adminPost('/api/admin/all-hands/start', { roomId });
+      const body = roomId ? { roomId } : { all: true };
+      const { ok, data } = await adminPost('/api/admin/all-hands/start', body);
       if (!ok) setAhError(data.error || 'Could not start the game.');
       await loadAhTable();
     } catch {
@@ -676,6 +683,46 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
           </div>
         )}
 
+        {/* The sponsor prize is ONE pool. Tables playing at the same time split
+            it, so a round can never pay out more than the sponsor put up. */}
+        {!!ahTable && (
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-mono text-slate-500 uppercase block">Prize pool</span>
+                <span className="text-lg font-bold font-display text-neon-green">{formatNaira(ahTable.prizePool)}</span>
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] font-mono text-slate-500 uppercase block">Unallocated</span>
+                <span className={`text-lg font-bold font-display ${ahTable.prizeRemaining > 0 ? 'text-white' : 'text-slate-600'}`}>
+                  {formatNaira(ahTable.prizeRemaining)}
+                </span>
+              </div>
+            </div>
+            <p className="text-[10px] font-mono text-slate-500 leading-relaxed">
+              Tables playing at the same time <strong className="text-slate-300">share this pool</strong> — two
+              at once means half each. A table playing alone takes it all. The pool refills once every
+              table has finished.
+            </p>
+            {(ahTable.tables || []).some(t => t.canStart) && (
+              <button
+                type="button"
+                onClick={() => startAllHands(null)}
+                disabled={ahStarting !== null}
+                className="w-full py-2 rounded-lg bg-neon-green/10 border border-neon-green/40 text-neon-green font-mono text-xs font-bold disabled:opacity-40 cursor-pointer flex items-center justify-center gap-2"
+              >
+                {ahStarting === '__all'
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Starting…</>
+                  : <><Gamepad2 className="w-4 h-4" /> Start all waiting tables together</>}
+              </button>
+            )}
+            <p className="text-[9px] text-slate-600 font-mono">
+              Starting them together is the fair way: every player sees their real prize before the
+              first card. Starting one at a time gives the first table a bigger share.
+            </p>
+          </div>
+        )}
+
         {!ahTable?.tables?.length ? (
           <p className="text-[11px] font-mono text-slate-500 py-3 text-center">
             No tables open yet — one opens when the first player enters.
@@ -702,6 +749,11 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
                     <span className="text-md font-bold font-display text-white">
                       {t.humans}<span className="text-slate-600 text-sm"> / {ahTable.seats}</span>
                     </span>
+                    {t.status === 'playing' && (
+                      <span className="text-[10px] font-mono text-neon-green block">
+                        playing for {formatNaira(t.prize)}
+                      </span>
+                    )}
                   </div>
                 </div>
 

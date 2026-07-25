@@ -1203,6 +1203,51 @@ function seatAllHandsBot(room: GameState, name: string): Player | null {
   return bot;
 }
 
+// -----------------------------------------------------------------------------
+// Prize pool sharing.
+//
+// The sponsor puts up ONE prize. Before this, every table paid that full amount
+// independently — two tables finishing meant paying it twice, three meant three
+// times, all of it landing in withdrawable balances.
+//
+// Now the prize is a pool. Tables that play at the same time split it, so the
+// total paid across a round can never exceed the sponsor prize. A table playing
+// on its own still takes the whole thing.
+//
+// A "round" is simply the period during which at least one table is playing:
+// the pool refills once every table has finished.
+// -----------------------------------------------------------------------------
+let allHandsRoundBudget = 0;
+
+function allHandsPlayingTables(): GameState[] {
+  return allHandsTables().filter(t => t.status === 'playing');
+}
+
+// Hand out an equal share of what's left to each table about to start. The
+// budget only refills when nothing is playing, so late-starting tables draw
+// from the remainder rather than minting more prize money.
+function allocateAllHandsPrize(rooms: GameState[]): number {
+  if (allHandsPlayingTables().length === 0) {
+    allHandsRoundBudget = allHandsPrizeInfo().prize;
+  }
+  if (!rooms.length) return 0;
+
+  const share = Math.max(0, Math.floor(allHandsRoundBudget / rooms.length));
+  for (const room of rooms) {
+    room.sponsorPrize = share;
+    room.pot = share;
+  }
+  allHandsRoundBudget = Math.max(0, allHandsRoundBudget - share * rooms.length);
+  return share;
+}
+
+// What an admin sees before starting: the pool, and what's still unallocated.
+function allHandsPoolState(): { pool: number; remaining: number } {
+  const pool = allHandsPrizeInfo().prize;
+  const remaining = allHandsPlayingTables().length === 0 ? pool : allHandsRoundBudget;
+  return { pool, remaining };
+}
+
 // Is the preselected winner already sitting at some OTHER table?
 function forcedWinnerSeatedElsewhere(exceptRoomId: string): boolean {
   if (!allHandsForcedWinnerName) return false;
@@ -2469,10 +2514,15 @@ app.post('/api/admin/all-hands/table', (req, res) => {
       status: room.status,
       players,
       humans,
+      // What THIS table is playing for. Only meaningful once it's playing —
+      // before that it's still just a slice of the pool waiting to be split.
+      prize: room.sponsorPrize,
       // Startable only when someone real is actually sitting there.
       canStart: room.status !== 'playing' && humans > 0 && prize.active,
     };
   });
+
+  const pool = allHandsPoolState();
 
   res.json({
     success: true,
@@ -2483,6 +2533,9 @@ app.post('/api/admin/all-hands/table', (req, res) => {
     botRoster: botNamePool(),
     prizeActive: prize.active,
     prize: prize.prize,
+    prizePool: pool.pool,
+    prizeRemaining: pool.remaining,
+    playingCount: allHandsPlayingTables().length,
     sponsorName: prize.sponsorName,
   });
 });
@@ -2549,28 +2602,53 @@ app.post('/api/admin/all-hands/start', (req, res) => {
   const { email, passcode } = req.body || {};
   if (!adminOk(email, passcode)) return res.status(401).json({ error: 'Invalid admin email or passcode.' });
 
-  // Which table? Explicit roomId, else the first startable one.
-  const requested = String(req.body?.roomId || '').trim();
-  const room = requested
-    ? gameRooms[requested]
-    : allHandsTables().find(t => t.status !== 'playing' && t.players.some(p => !p.isBot));
-
-  if (!room || !isAllHandsRoom(room.roomId)) {
-    return res.status(400).json({ error: 'No table with players waiting.' });
-  }
-  if (room.status === 'playing') return res.status(409).json({ error: 'That table is already playing.' });
   if (!allHandsPrizeInfo().active) {
     return res.status(400).json({ error: 'Set a sponsor and prize before starting a game.' });
   }
-  if (room.status === 'finished') resetAllHandsRoom(room);
-  if (!room.players.some(p => !p.isBot)) {
+
+  // `all: true` starts every waiting table together — the recommended way, since
+  // the prize split is then known up front and shown to players before a card
+  // is dealt. A single roomId starts just that table.
+  const startAll = req.body?.all === true;
+  const requested = String(req.body?.roomId || '').trim();
+
+  const candidates = startAll
+    ? allHandsTables().filter(t => t.status !== 'playing' && t.players.some(p => !p.isBot))
+    : [gameRooms[requested] ?? allHandsTables().find(t => t.status !== 'playing' && t.players.some(p => !p.isBot))]
+        .filter(Boolean) as GameState[];
+
+  const targets = candidates.filter(r => r && isAllHandsRoom(r.roomId));
+  if (!targets.length) return res.status(400).json({ error: 'No table with players waiting.' });
+  if (targets.some(r => r.status === 'playing')) {
+    return res.status(409).json({ error: 'That table is already playing.' });
+  }
+
+  for (const room of targets) {
+    if (room.status === 'finished') resetAllHandsRoom(room);
+  }
+  const playable = targets.filter(r => r.players.some(p => !p.isBot));
+  if (!playable.length) {
     return res.status(400).json({ error: 'No real players are seated at that table.' });
   }
 
-  startAllHands(room);
-  broadcastRoomState(room.roomId);
-  console.log(`All Hands ${room.roomId} started by admin ${String(email).toLowerCase()} — ${room.players.length} seated.`);
-  res.json({ success: true, roomId: room.roomId, status: room.status });
+  // Split the pool BEFORE dealing, so each table carries its true prize.
+  const share = allocateAllHandsPrize(playable);
+
+  for (const room of playable) {
+    startAllHands(room);
+    broadcastRoomState(room.roomId);
+  }
+  console.log(
+    `All Hands started by admin ${String(email).toLowerCase()} — ` +
+    `${playable.length} table(s), ₦${share} each.`,
+  );
+
+  res.json({
+    success: true,
+    started: playable.map(r => r.roomId),
+    prizePerTable: share,
+    remainingPool: allHandsPoolState().remaining,
+  });
 });
 
 app.post('/api/all-hands/force-winner', (req, res) => {
@@ -2995,6 +3073,7 @@ wss.on('connection', async (ws: WebSocket, req) => {
       // whistle, in which case it waits for them.
       if (!adminConfig.allHandsAdminStart
           && room.players.filter(p => !p.isBot).length >= clampAllHandsSize(allHandsSize)) {
+        allocateAllHandsPrize([room]); // take a share of the pool, not the whole prize
         startAllHands(room);
       }
       broadcastRoomState(room.roomId);
@@ -3009,6 +3088,7 @@ wss.on('connection', async (ws: WebSocket, req) => {
         ws.send(JSON.stringify({ type: 'warning', message: 'The host starts this game — hang tight, it will begin shortly.' }));
         return;
       }
+      allocateAllHandsPrize([room]); // take a share of the pool, not the whole prize
       startAllHands(room);
       broadcastRoomState(room.roomId);
       return;
