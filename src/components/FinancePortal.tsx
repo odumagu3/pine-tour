@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { UserProfile, Transaction, PublicConfig } from '../types.js';
 import { CreditCard, Wallet, ArrowDownLeft, ArrowUpRight, ShieldCheck, HelpCircle, Lock, Loader2, CheckCircle2, AlertCircle, Copy, Check, Ticket, Gift, Landmark } from 'lucide-react';
@@ -36,6 +36,11 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
   const [depositError, setDepositError] = useState('');
   const [initializing, setInitializing] = useState(false);
   const [paystackRef, setPaystackRef] = useState<string | null>(null);
+  // Balance to beat while we wait for a deposit to land. Bank transfer and USSD
+  // settle after the popup closes, via webhook, so the number on screen has to
+  // move by itself — otherwise the player is left wondering where their money
+  // went and tries paying again.
+  const [awaitingCredit, setAwaitingCredit] = useState<number | null>(null);
 
   // Withdrawal States — Paystack transfer to a Nigerian bank account.
   const [withdrawAmount, setWithdrawAmount] = useState('2000');
@@ -129,6 +134,44 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
     }
   };
 
+  // While a deposit is settling, re-fetch the profile until the balance moves.
+  // Stops as soon as the money lands, or after two minutes so a truly abandoned
+  // payment doesn't leave the app polling forever.
+  useEffect(() => {
+    if (awaitingCredit === null) return;
+
+    if (profile.balance > awaitingCredit) {
+      setAwaitingCredit(null);
+      setDepositError('');
+      setDepositStatus('completed');
+      // The reset back to 'idle' lives in its own effect below. Scheduling it
+      // here would tie it to this effect's cleanup — and clearing awaitingCredit
+      // re-runs this effect immediately, which would cancel the reset and leave
+      // the success screen up forever.
+      return;
+    }
+
+    const startedAt = Date.now();
+    const id = window.setInterval(() => {
+      if (Date.now() - startedAt > 120000) {
+        window.clearInterval(id);
+        setAwaitingCredit(null);
+        return;
+      }
+      onRefreshProfile();
+    }, 3000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitingCredit, profile.balance]);
+
+  // Drop the deposit success screen back to the form after a moment, wherever
+  // it was set from.
+  useEffect(() => {
+    if (depositStatus !== 'completed') return;
+    const id = window.setTimeout(() => setDepositStatus('idle'), 3000);
+    return () => window.clearTimeout(id);
+  }, [depositStatus]);
+
   // Ask the server to verify a reference with Paystack. The server is the only
   // thing that credits the wallet — a client callback never does.
   const verifyPaystack = async (reference: string) => {
@@ -156,6 +199,9 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
       return;
     }
 
+    // Remember what the wallet held before, so we can tell when it moves.
+    const baseline = profile.balance;
+
     setInitializing(true);
     try {
       const response = await fetch(apiUrl(`/api/paystack/initialize`), {
@@ -172,26 +218,27 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
       setPaystackRef(data.reference);
       const outcome = await openPaystackCheckout(data.access_code);
 
-      if (outcome === 'cancelled') {
-        setDepositError('Payment cancelled — nothing was charged.');
-        return;
-      }
       if (outcome === 'error') {
         setDepositError('Paystack reported a problem with that payment.');
         return;
       }
 
+      // Watch for the money regardless of how the popup closed. Closing it does
+      // NOT mean no payment: a player choosing bank transfer often closes the
+      // window and pays from their banking app minutes later.
+      setAwaitingCredit(baseline);
+
+      if (outcome === 'cancelled') {
+        setDepositError('Checkout closed. If you already sent a transfer or used USSD, your balance will update here on its own.');
+        return;
+      }
+
       const verified = await verifyPaystack(data.reference);
       if (verified.ok) {
-        setDepositStatus('completed');
-        onRefreshProfile();
-        setTimeout(() => setDepositStatus('idle'), 3000);
+        onRefreshProfile(); // the watcher above flips the UI once it lands
       } else {
-        // Bank transfer and USSD can settle after the popup closes, so a failed
-        // verify here is often just "not yet" — the webhook will finish it.
-        setDepositError(
-          `${verified.error} If you completed a transfer or USSD payment, it can take a minute — your balance will update automatically.`,
-        );
+        // Often just "not yet" — the webhook finishes it moments later.
+        setDepositError('Payment received — waiting for it to settle. Your balance will update here automatically.');
         onRefreshProfile();
       }
     } catch (err) {
@@ -592,7 +639,19 @@ export default function FinancePortal({ profile, config, onRefreshProfile }: Fin
                     <span className="text-[9px] font-bold px-1.5 py-0.5 rounded flex-shrink-0" style={{ background: '#fff4e5', color: '#b26a00' }}>TEST</span>
                   </div>
 
-                  {depositError && (
+                  {/* Settling: shown while we watch for the money to land, so a
+                      slow bank transfer never looks like a lost payment. */}
+                  {awaitingCredit !== null && (
+                    <div className="p-3 bg-neon-cyan/5 border border-neon-cyan/30 rounded-lg text-xs text-neon-cyan font-mono flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />
+                      <span>
+                        Waiting for your payment to settle — this page updates by itself, no need to
+                        refresh or pay again.
+                      </span>
+                    </div>
+                  )}
+
+                  {depositError && awaitingCredit === null && (
                     <div className="p-3 bg-red-950/40 border border-red-500/30 rounded-lg text-xs text-red-400 font-mono flex items-center gap-2">
                       <AlertCircle className="w-4 h-4" />
                       {depositError}
