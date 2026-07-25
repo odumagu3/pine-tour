@@ -3,7 +3,27 @@ import { motion } from 'motion/react';
 import { PublicConfig } from '../types.js';
 import { formatNaira } from '../currency.js';
 import { apiUrl } from '../config.js';
-import { ShieldCheck, Lock, Loader2, CheckCircle2, AlertCircle, Save, Building2, Trophy, Ticket, Gamepad2, Users, Unlock } from 'lucide-react';
+import { ShieldCheck, Lock, Loader2, CheckCircle2, AlertCircle, Save, Building2, Trophy, Ticket, Gamepad2, Users, Unlock, Landmark, RefreshCw, Wallet, Copy, Check } from 'lucide-react';
+
+interface WithdrawalRequest {
+  id: string;
+  email: string;
+  amount: number;
+  bankName: string;
+  accountNumber: string;
+  accountName: string;
+  status: 'pending' | 'paid' | 'rejected';
+  createdAt: string;
+}
+
+interface PlayerRow {
+  email: string;
+  balance: number;
+  tickets: number;
+  gamesPlayed: number;
+  gamesWon: number;
+  verificationStatus: string;
+}
 
 interface AdminDashboardProps {
   email: string;
@@ -92,6 +112,63 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
     newPasscode: '',
   });
 
+  // --- Withdrawal queue + player roster (loaded after unlocking) ------------
+  const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
+  const [wdFilter, setWdFilter] = useState<'pending' | 'all'>('pending');
+  const [wdBusy, setWdBusy] = useState<string | null>(null);
+  const [players, setPlayers] = useState<PlayerRow[]>([]);
+  const [playerCount, setPlayerCount] = useState(0);
+  const [opsError, setOpsError] = useState('');
+  const [opsLoading, setOpsLoading] = useState(false);
+  const [copied, setCopied] = useState('');
+
+  const adminPost = async (path: string, body: Record<string, unknown>) => {
+    const res = await fetch(apiUrl(path), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, passcode, ...body }),
+    });
+    return { ok: res.ok, data: await res.json().catch(() => ({})) };
+  };
+
+  const loadOps = async (status: 'pending' | 'all' = wdFilter) => {
+    setOpsLoading(true);
+    setOpsError('');
+    try {
+      const [wd, pl] = await Promise.all([
+        adminPost('/api/admin/withdrawals', { status }),
+        adminPost('/api/admin/players', {}),
+      ]);
+      if (wd.ok) setWithdrawals(wd.data.withdrawals || []);
+      if (pl.ok) { setPlayers(pl.data.players || []); setPlayerCount(pl.data.count || 0); }
+      if (!wd.ok || !pl.ok) setOpsError('Could not load the latest data.');
+    } catch {
+      setOpsError('Could not reach the admin service.');
+    } finally {
+      setOpsLoading(false);
+    }
+  };
+
+  const resolveWithdrawal = async (id: string, action: 'paid' | 'rejected') => {
+    setWdBusy(id);
+    setOpsError('');
+    try {
+      const { ok, data } = await adminPost('/api/admin/withdrawals/resolve', { id, action });
+      if (!ok) setOpsError(data.error || 'Could not update that request.');
+      await loadOps();
+    } catch {
+      setOpsError('Could not reach the admin service.');
+    } finally {
+      setWdBusy(null);
+    }
+  };
+
+  const copyValue = (value: string) => {
+    navigator.clipboard?.writeText(value).catch(() => {});
+    setCopied(value);
+    setTimeout(() => setCopied(''), 1500);
+  };
+
   const handleUnlock = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -108,6 +185,7 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
       } else {
         setForm(toEditable(data.config));
         setUnlocked(true);
+        loadOps(); // pull the withdrawal queue and player roster straight away
       }
     } catch {
       setError('Could not reach the admin service.');
@@ -446,6 +524,176 @@ export default function AdminDashboard({ email, config, onSaved }: AdminDashboar
           );
         })()}
         <p className="text-[9px] text-amber-500/80 font-mono">⚠️ Turn these off before real players/payments.</p>
+      </Section>
+
+      {/* Withdrawal requests — the queue an admin actually pays out by hand */}
+      <Section icon={<Landmark className="w-4 h-4" />} title="Withdrawal Requests">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex gap-1.5">
+            {(['pending', 'all'] as const).map(f => (
+              <button
+                key={f}
+                type="button"
+                onClick={() => { setWdFilter(f); loadOps(f); }}
+                className={`px-3 py-1 rounded-lg font-mono text-[10px] font-bold transition-all cursor-pointer ${
+                  wdFilter === f ? 'bg-neon-cyan/15 border border-neon-cyan/40 text-neon-cyan' : 'bg-slate-900 border border-slate-800 text-slate-400'
+                }`}
+              >
+                {f === 'pending' ? 'Pending' : 'All'}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => loadOps()}
+            disabled={opsLoading}
+            className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white font-mono text-[10px] disabled:opacity-50 cursor-pointer"
+          >
+            <RefreshCw className={`w-3 h-3 ${opsLoading ? 'animate-spin' : ''}`} /> Refresh
+          </button>
+        </div>
+
+        {opsError && (
+          <div className="p-2.5 bg-red-950/40 border border-red-500/30 rounded-lg text-[11px] text-red-400 font-mono flex items-center gap-2">
+            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" /> {opsError}
+          </div>
+        )}
+
+        {withdrawals.length === 0 ? (
+          <p className="text-[11px] font-mono text-slate-500 py-3 text-center">
+            {opsLoading ? 'Loading…' : wdFilter === 'pending' ? 'No pending withdrawal requests.' : 'No withdrawal requests yet.'}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {withdrawals.map(w => (
+              <div key={w.id} className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-lg font-bold font-display text-neon-cyan">{formatNaira(w.amount)}</div>
+                    <div className="text-[10px] font-mono text-slate-500 truncate">{w.email}</div>
+                  </div>
+                  <span className={`text-[9px] font-mono px-2 py-0.5 rounded flex-shrink-0 ${
+                    w.status === 'pending' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                      : w.status === 'paid' ? 'bg-neon-green/10 text-neon-green border border-neon-green/30'
+                      : 'bg-red-500/10 text-red-400 border border-red-500/30'
+                  }`}>
+                    {w.status.toUpperCase()}
+                  </span>
+                </div>
+
+                {/* What the admin needs to actually send the money */}
+                <div className="bg-slate-950/70 rounded-lg p-2.5 border border-slate-800/70 space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-mono text-slate-500">Account name</span>
+                    <span className="text-[11px] font-mono text-white truncate">{w.accountName || '—'}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-mono text-slate-500">Account number</span>
+                    <button
+                      type="button"
+                      onClick={() => copyValue(w.accountNumber)}
+                      className="text-[11px] font-mono text-neon-cyan flex items-center gap-1 cursor-pointer hover:opacity-80"
+                    >
+                      {w.accountNumber || '—'}
+                      {copied === w.accountNumber ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-mono text-slate-500">Bank</span>
+                    <span className="text-[11px] font-mono text-white truncate">{w.bankName || '—'}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-mono text-slate-500">Requested</span>
+                    <span className="text-[10px] font-mono text-slate-400">
+                      {new Date(w.createdAt).toLocaleString('en-NG')}
+                    </span>
+                  </div>
+                </div>
+
+                {w.status === 'pending' && (
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => resolveWithdrawal(w.id, 'paid')}
+                      disabled={wdBusy === w.id}
+                      className="flex-1 py-2 rounded-lg bg-neon-green/10 border border-neon-green/40 text-neon-green font-mono text-[11px] font-bold disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
+                    >
+                      {wdBusy === w.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                      Mark Paid
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => resolveWithdrawal(w.id, 'rejected')}
+                      disabled={wdBusy === w.id}
+                      className="flex-1 py-2 rounded-lg bg-red-500/10 border border-red-500/40 text-red-400 font-mono text-[11px] font-bold disabled:opacity-50 cursor-pointer"
+                    >
+                      Reject &amp; Refund
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="text-[9px] text-slate-600 font-mono">
+          Payouts are not automated. Send the money from your bank or Paystack dashboard, then mark it
+          paid. Rejecting returns the amount to the player's wallet.
+        </p>
+      </Section>
+
+      {/* Player roster — headcount, tickets and wallet balances */}
+      <Section icon={<Wallet className="w-4 h-4" />} title={`Players — ${playerCount}`}>
+        <div className="grid grid-cols-3 gap-2">
+          <div className="bg-slate-900/60 rounded-lg p-2.5 border border-slate-800">
+            <span className="text-[9px] font-mono text-slate-500 uppercase block">Players</span>
+            <span className="text-xl font-bold font-display text-white">{playerCount}</span>
+          </div>
+          <div className="bg-slate-900/60 rounded-lg p-2.5 border border-slate-800">
+            <span className="text-[9px] font-mono text-slate-500 uppercase block">Tickets held</span>
+            <span className="text-xl font-bold font-display text-neon-purple">
+              {players.reduce((s, p) => s + p.tickets, 0)}
+            </span>
+          </div>
+          <div className="bg-slate-900/60 rounded-lg p-2.5 border border-slate-800">
+            <span className="text-[9px] font-mono text-slate-500 uppercase block">Wallets total</span>
+            <span className="text-xl font-bold font-display text-neon-green">
+              {formatNaira(players.reduce((s, p) => s + p.balance, 0))}
+            </span>
+          </div>
+        </div>
+
+        {players.length === 0 ? (
+          <p className="text-[11px] font-mono text-slate-500 py-3 text-center">
+            {opsLoading ? 'Loading…' : 'No players yet.'}
+          </p>
+        ) : (
+          <div className="max-h-80 overflow-y-auto -mx-1 px-1">
+            <table className="w-full text-left border-collapse">
+              <thead className="sticky top-0 bg-dark-card">
+                <tr className="text-[9px] font-mono text-slate-500 uppercase">
+                  <th className="py-1.5 pr-2">Player</th>
+                  <th className="py-1.5 px-1 text-right">Tickets</th>
+                  <th className="py-1.5 pl-2 text-right">Wallet</th>
+                </tr>
+              </thead>
+              <tbody>
+                {players.map(p => (
+                  <tr key={p.email} className="border-t border-slate-900">
+                    <td className="py-1.5 pr-2">
+                      <div className="text-[11px] font-mono text-white truncate max-w-[180px]">{p.email}</div>
+                      <div className="text-[9px] font-mono text-slate-600">
+                        {p.gamesPlayed} played · {p.gamesWon} won
+                        {p.verificationStatus === 'verified' && <span className="text-neon-green"> · KYC ✓</span>}
+                      </div>
+                    </td>
+                    <td className="py-1.5 px-1 text-right text-[11px] font-mono text-neon-purple">{p.tickets}</td>
+                    <td className="py-1.5 pl-2 text-right text-[11px] font-mono text-neon-green">{formatNaira(p.balance)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Section>
 
       {/* Access control */}

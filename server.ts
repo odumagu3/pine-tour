@@ -15,6 +15,8 @@ import {
   createReferral, getPendingReferralFor, claimReferralReward, referralStats,
   createPayment, getPayment, creditPayment, markPaymentFailed,
   getWithdrawalPinHash, setWithdrawalPinHash,
+  createWithdrawal, listWithdrawals, resolveWithdrawal, updateTransactionStatus,
+  listPlayers,
 } from './src/db.js';
 
 const PORT = Number(process.env.PORT) || 5174;
@@ -2374,19 +2376,28 @@ app.post('/api/profile/withdraw', async (req, res) => {
     return res.status(400).json({ error: 'Insufficient ledger balance.' });
   }
 
-  const txId = generateHash();
-  // Paystack transfer references start with TRF_.
-  const txHash = 'TRF_' + Math.random().toString(36).substring(2, 12);
+  // Bank details are what make the request payable — without them an admin has
+  // nowhere to send the money. Previously they were received and discarded.
+  const { bank, accountNumber, accountName } = req.body;
+  const acct = String(accountNumber || '').replace(/\D/g, '');
+  if (acct.length !== 10 || !String(accountName || '').trim()) {
+    return res.status(400).json({ error: 'A resolved 10-digit bank account is required.' });
+  }
 
+  const txId = generateHash();
+  const txHash = 'WD_' + Math.random().toString(36).substring(2, 12);
+
+  // Debit immediately so the same balance can't be requested twice while the
+  // request sits in the queue. A rejection refunds it.
   profile.balance -= parseFloat(amount);
 
   const newTx: Transaction = {
     id: txId,
     type: 'withdrawal',
     amount: parseFloat(amount),
-    status: 'completed',
+    status: 'pending', // an admin still has to actually send the money
     timestamp: new Date().toISOString(),
-    method: method || 'Paystack Transfer',
+    method: method || 'Bank transfer',
     txHash: txHash,
     balanceAfter: profile.balance,
   };
@@ -2394,7 +2405,84 @@ app.post('/api/profile/withdraw', async (req, res) => {
   addTransaction(email, newTx);
   saveProfile(email);
 
-  res.json({ success: true, transaction: newTx, balance: profile.balance });
+  const request = await createWithdrawal({
+    email: String(email).toLowerCase().trim(),
+    amount: parseFloat(amount),
+    bankName: String(bank || ''),
+    accountNumber: acct,
+    accountName: String(accountName).trim(),
+    transactionId: txId,
+  });
+
+  if (!request) {
+    // Never leave the player short if the request didn't record — put it back.
+    profile.balance += parseFloat(amount);
+    saveProfile(email);
+    return res.status(500).json({ error: 'Could not submit your withdrawal request. Nothing was deducted.' });
+  }
+
+  res.json({ success: true, transaction: newTx, balance: profile.balance, requestId: request.id });
+});
+
+// -----------------------------------------------------------------------------
+// ADMIN — withdrawal queue and player roster.
+// Both re-check the admin passcode: these expose bank details and every
+// player's balance, so they must never be reachable without it.
+// -----------------------------------------------------------------------------
+function adminOk(email: any, passcode: any): boolean {
+  return isAdminEmail(email) && passcode === adminConfig.adminPasscode;
+}
+
+// List withdrawal requests (default: the pending queue).
+app.post('/api/admin/withdrawals', async (req, res) => {
+  const { email, passcode, status } = req.body || {};
+  if (!adminOk(email, passcode)) return res.status(401).json({ error: 'Invalid admin email or passcode.' });
+  const filter = status === 'all' ? undefined : (status || 'pending');
+  const rows = await listWithdrawals(filter);
+  res.json({ success: true, withdrawals: rows });
+});
+
+// Mark a request paid, or reject it and refund the player.
+app.post('/api/admin/withdrawals/resolve', async (req, res) => {
+  const { email, passcode, id, action, note } = req.body || {};
+  if (!adminOk(email, passcode)) return res.status(401).json({ error: 'Invalid admin email or passcode.' });
+  if (action !== 'paid' && action !== 'rejected') {
+    return res.status(400).json({ error: 'Action must be "paid" or "rejected".' });
+  }
+
+  // resolveWithdrawal only flips a still-pending row, so two admins clicking at
+  // once can't both resolve it — and a rejection can't refund twice.
+  const row = await resolveWithdrawal(String(id || ''), action, String(note || ''));
+  if (!row) return res.status(409).json({ error: 'That request was already handled.' });
+
+  if (row.transactionId) {
+    await updateTransactionStatus(row.transactionId, action === 'paid' ? 'completed' : 'failed');
+  }
+
+  if (action === 'rejected') {
+    const profile = await ensureProfile(row.email);
+    profile.balance += row.amount;
+    // Keep the cached ledger entry honest too, not just the database.
+    const cachedTx = profile.history.find(t => t.id === row.transactionId);
+    if (cachedTx) cachedTx.status = 'failed';
+    saveProfile(row.email);
+    console.log(`Withdrawal ${row.id} rejected — refunded ₦${row.amount} to ${row.email}`);
+  } else {
+    const profile = await ensureProfile(row.email);
+    const cachedTx = profile.history.find(t => t.id === row.transactionId);
+    if (cachedTx) cachedTx.status = 'completed';
+    console.log(`Withdrawal ${row.id} marked paid — ₦${row.amount} to ${row.email}`);
+  }
+
+  res.json({ success: true, withdrawal: { ...row, status: action } });
+});
+
+// Every player with their wallet and ticket position.
+app.post('/api/admin/players', async (req, res) => {
+  const { email, passcode } = req.body || {};
+  if (!adminOk(email, passcode)) return res.status(401).json({ error: 'Invalid admin email or passcode.' });
+  const { count, players } = await listPlayers();
+  res.json({ success: true, count, players });
 });
 
 // 4. POST Simulated ID Verification submission (KYC)

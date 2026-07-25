@@ -127,7 +127,7 @@ export default function AllHandsScreen({
             </div>
           )}
           <p className="text-[10px] font-mono text-slate-500 mt-2">
-            Empty seats fill with AI when you start — or wait for more players to join.
+            wait for more players to join.
           </p>
         </div>
 

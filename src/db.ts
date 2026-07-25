@@ -220,6 +220,136 @@ export async function deleteProfile(email: string): Promise<void> {
 }
 
 // -----------------------------------------------------------------------------
+// Withdrawal requests
+//
+// Payouts are fulfilled by hand, so each withdrawal is a queued request an
+// admin marks paid (or rejects, which refunds the player).
+// -----------------------------------------------------------------------------
+
+export interface WithdrawalRow {
+  id: string;
+  email: string;
+  amount: number;
+  bankName: string;
+  accountNumber: string;
+  accountName: string;
+  status: 'pending' | 'paid' | 'rejected';
+  note: string;
+  transactionId: string | null;
+  createdAt: string;
+  processedAt: string | null;
+}
+
+function rowToWithdrawal(r: any): WithdrawalRow {
+  return {
+    id: r.id,
+    email: r.email,
+    amount: Number(r.amount),
+    bankName: r.bank_name ?? '',
+    accountNumber: r.account_number ?? '',
+    accountName: r.account_name ?? '',
+    status: r.status,
+    note: r.note ?? '',
+    transactionId: r.transaction_id ?? null,
+    createdAt: r.created_at,
+    processedAt: r.processed_at ?? null,
+  };
+}
+
+export async function createWithdrawal(w: {
+  email: string; amount: number; bankName: string; accountNumber: string;
+  accountName: string; transactionId: string;
+}): Promise<WithdrawalRow | null> {
+  if (!persistenceEnabled) return null;
+  const { data, error } = await supabase.from('withdrawals').insert({
+    email: w.email.toLowerCase().trim(),
+    amount: w.amount,
+    bank_name: w.bankName,
+    account_number: w.accountNumber,
+    account_name: w.accountName,
+    transaction_id: w.transactionId,
+  }).select('*').maybeSingle();
+  if (error) { console.error('createWithdrawal failed:', error.message); return null; }
+  return data ? rowToWithdrawal(data) : null;
+}
+
+// Newest first. `status` filters the queue; omit it for everything.
+export async function listWithdrawals(status?: string, limit = 100): Promise<WithdrawalRow[]> {
+  if (!persistenceEnabled) return [];
+  let q = supabase.from('withdrawals').select('*').order('created_at', { ascending: false }).limit(limit);
+  if (status) q = q.eq('status', status);
+  const { data, error } = await q;
+  if (error) { console.error('listWithdrawals failed:', error.message); return []; }
+  return (data ?? []).map(rowToWithdrawal);
+}
+
+// Compare-and-swap on status, so two admins clicking at once can't both resolve
+// the same request (and double-refund a rejection).
+export async function resolveWithdrawal(
+  id: string, status: 'paid' | 'rejected', note: string,
+): Promise<WithdrawalRow | null> {
+  if (!persistenceEnabled) return null;
+  const { data, error } = await supabase
+    .from('withdrawals')
+    .update({ status, note, processed_at: new Date().toISOString() })
+    .eq('id', id)
+    .eq('status', 'pending')
+    .select('*');
+  if (error) { console.error('resolveWithdrawal failed:', error.message); return null; }
+  return data && data.length ? rowToWithdrawal(data[0]) : null;
+}
+
+// Keep the ledger entry in step with the request it belongs to.
+export async function updateTransactionStatus(id: string, status: string): Promise<void> {
+  if (!persistenceEnabled) return;
+  const { error } = await supabase.from('transactions').update({ status }).eq('id', id);
+  if (error) console.error('updateTransactionStatus failed:', error.message);
+}
+
+// -----------------------------------------------------------------------------
+// Admin roster
+// -----------------------------------------------------------------------------
+
+export interface PlayerSummary {
+  email: string;
+  balance: number;
+  tickets: number;
+  gamesPlayed: number;
+  gamesWon: number;
+  totalEarnings: number;
+  verificationStatus: string;
+  createdAt: string;
+}
+
+// Every player with their wallet and ticket position. Admin-only — the caller
+// must have checked the admin passcode before calling this.
+export async function listPlayers(limit = 500): Promise<{ count: number; players: PlayerSummary[] }> {
+  if (!persistenceEnabled) return { count: 0, players: [] };
+
+  const { count } = await supabase.from('profiles').select('email', { count: 'exact', head: true });
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('email, balance, tickets, games_played, games_won, total_earnings, verification_status, created_at')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) { console.error('listPlayers failed:', error.message); return { count: 0, players: [] }; }
+
+  return {
+    count: count ?? (data?.length ?? 0),
+    players: (data ?? []).map(r => ({
+      email: r.email,
+      balance: Number(r.balance),
+      tickets: Number(r.tickets),
+      gamesPlayed: Number(r.games_played),
+      gamesWon: Number(r.games_won),
+      totalEarnings: Number(r.total_earnings),
+      verificationStatus: r.verification_status,
+      createdAt: r.created_at,
+    })),
+  };
+}
+
+// -----------------------------------------------------------------------------
 // Withdrawal PIN
 //
 // Read and written only here. The hash never leaves the server — rowToProfile
